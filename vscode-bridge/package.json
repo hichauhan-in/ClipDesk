@@ -1,0 +1,56 @@
+{
+  "name": "clipdesk-bridge",
+  "displayName": "ClipDesk Bridge",
+  "description": "Lets the local ClipDesk app use your GitHub Copilot seat through VS Code's Language Model API.",
+  "version": "0.1.0",
+  "publisher": "clipdesk",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "clipdeskBridge.authorize",
+        "title": "ClipDesk Bridge: Authorise Copilot Access",
+        "category": "ClipDesk"
+      },
+      {
+        "command": "clipdeskBridge.status",
+        "title": "ClipDesk Bridge: Show Status",
+        "category": "ClipDesk"
+      },
+      {
+        "command": "clipdeskBridge.restart",
+        "title": "ClipDesk Bridge: Restart Server",
+        "category": "ClipDesk"
+      }
+    ],
+    "configuration": {
+      "title": "ClipDesk Bridge",
+      "properties": {
+        "clipdeskBridge.port": {
+          "type": "number",
+          "default": 8761,
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Port the bridge listens on (127.0.0.1 only). Use 0 to pick a free port automatically."
+        },
+        "clipdeskBridge.modelFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred Copilot model family, e.g. gpt-4o or claude-3.5-sonnet. Leave empty to use the first available model."
+        },
+        "clipdeskBridge.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the bridge automatically when VS Code opens."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+# Provisioned binaries and model weights (fetched by `clipdesk bootstrap`)
+vendor/
+
+# Per-video project folders and uploads
+workspace/
+
+# Distribution bundles built by scripts/package.ps1
+dist/
+
+# Local overrides
+config/local.yaml
+.clipdesk-bridge.json
+
+# Throwaway experiments and test media
+.scratch/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Node (VS Code bridge extension only)
+node_modules/
+*.vsix
+
+.DS_Store

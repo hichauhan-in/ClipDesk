@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipdesk"
+version = "0.1.0"
+description = "Transcript-driven video analysis and editing for the browser, powered by your GitHub Copilot seat."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Everything needed to run the server, analyse a transcript and render video.
+# The heavy speech-to-text stack is an extra so the app installs and starts even
+# on a machine that will only ever consume uploaded .srt/.vtt transcripts.
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+transcribe = ["faster-whisper>=1.0.3"]
+# The media extractor is deliberately NOT a pip dependency: some corporate
+# package proxies reject the yt-dlp wheel, and a failed install would take the
+# whole launcher down with it. It is provisioned as a standalone binary into
+# vendor/ instead — see clipdesk/bootstrap/manifest.py.
+dev = ["pytest>=8.2", "ruff>=0.5"]
+
+[project.scripts]
+clipdesk = "clipdesk.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["clipdesk*"]
+
+[tool.setuptools.package-data]
+clipdesk = ["web/**/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
