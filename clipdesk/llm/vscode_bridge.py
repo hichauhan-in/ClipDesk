@@ -38,6 +38,29 @@ SETUP_HINT = (
 
 EXTENSION_ID = "clipdesk.clipdesk-bridge"
 
+#: The bridge this build of ClipDesk expects VS Code to be running. Kept in step
+#: with vscode-bridge/package.json.
+BRIDGE_VERSION = "0.1.5"
+
+
+def _version_parts(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in value.split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _is_older(running: str, expected: str) -> bool:
+    """True when VS Code is executing an older bridge than the installed one.
+
+    A blank version means a build from before the bridge reported one at all,
+    which is by definition older.
+    """
+    if not running:
+        return True
+    return _version_parts(running) < _version_parts(expected)
+
 
 def extension_state(handshake_file: str | None = None) -> dict[str, object]:
     """Where the bridge has got to, so the UI can give the right instruction.
@@ -134,6 +157,23 @@ class VSCodeBridgeProvider:
 
         models = [str(m) for m in payload.get("models") or []]
         active = self.config.model or str(payload.get("default_model") or "")
+        running = str(payload.get("bridge_version") or "")
+        if _is_older(running, BRIDGE_VERSION):
+            # VS Code caches the extension module, so installing a new bridge
+            # changes the file without changing what is executing. The visible
+            # symptom is silent: token counts quietly fall back to estimates.
+            return ProviderStatus(
+                self.key,
+                self.label,
+                True,
+                f"Connected to VS Code at {base_url}, but it is running bridge "
+                f"{running or 'from before versions were reported'} while "
+                f"{BRIDGE_VERSION} is installed. Reload the VS Code window "
+                "(Developer: Reload Window) to pick it up — until then token "
+                "counts are estimated rather than measured.",
+                models=models,
+                active_model=active,
+            )
         if not payload.get("copilot_available", True):
             return ProviderStatus(
                 self.key,

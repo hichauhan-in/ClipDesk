@@ -24,6 +24,8 @@ const vscode = require("vscode");
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const HANDSHAKE_DIR = path.join(os.homedir(), ".clipdesk");
 const HANDSHAKE_FILE = path.join(HANDSHAKE_DIR, "bridge.json");
+// Read from the manifest so it cannot drift from the published version.
+const BRIDGE_VERSION = require("./package.json").version;
 //: How often to check the handshake is still there, and to retry the port.
 const WATCHDOG_MS = 20000;
 
@@ -199,10 +201,9 @@ async function handleChat(request, response) {
   let promptTokens = 0;
   try {
     for (const message of messages) {
-      const text = Array.isArray(message.content)
-        ? message.content.map((part) => part.value ?? "").join("")
-        : String(message.content ?? "");
-      promptTokens += await model.countTokens(text);
+      // Counted as a message, not as its text: the chat format adds role and
+      // delimiter tokens per message that are billed but are not in the string.
+      promptTokens += await model.countTokens(message);
     }
     const configuredLimit = Number.isSafeInteger(payload.context_window_tokens)
       ? payload.context_window_tokens
@@ -291,6 +292,9 @@ async function handleHealth(response) {
     models: models.map((model) => model.family || model.id),
     default_model: chosen ? chosen.family || chosen.id : "",
     vscode_version: vscode.version,
+    // The version of the code actually executing, which is not necessarily the
+    // one on disk: VS Code caches the module until the window is reloaded.
+    bridge_version: BRIDGE_VERSION,
   });
 }
 
@@ -302,9 +306,15 @@ function writeHandshake(port) {
     token,
     pid: process.pid,
     started_at: new Date().toISOString(),
+    bridge_version: BRIDGE_VERSION,
   };
   // 0o600: readable only by this user, so another account cannot spend the seat.
-  fs.writeFileSync(HANDSHAKE_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  // Written to a sibling then renamed, because rename is atomic: ClipDesk polls
+  // this file and would otherwise sometimes read it half-written and conclude
+  // the bridge was down.
+  const staging = `${HANDSHAKE_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(staging, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  fs.renameSync(staging, HANDSHAKE_FILE);
   try {
     fs.chmodSync(HANDSHAKE_FILE, 0o600);
   } catch {

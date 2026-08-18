@@ -163,6 +163,7 @@ from clipdesk.llm import PRESETS, LLMClient, all_statuses, extension_state
 from clipdesk.llm.budget import LEVELS as BUDGET_LEVELS
 from clipdesk.llm.budget import TASKS as BUDGET_TASKS
 from clipdesk.llm.budget import TASK_LABELS, budget_for, pick_model, rank_models
+from clipdesk.llm.credits import credits_for_tokens
 from clipdesk.llm.presets import get as get_preset
 from clipdesk.llm.registry import build_provider
 from clipdesk.media.ffmpeg import find_tools
@@ -337,6 +338,8 @@ class UserState:
         self.shutdown_callback: Callable[[], None] | None = None
         self._probe_lock = threading.Lock()
         self._probe_cache: dict[str, tuple[float, Any]] = {}
+        self._last_good_provider: Any = None
+        self._provider_failures = 0
 
     def reload_settings(self) -> None:
         if self.settings_path is None:
@@ -396,6 +399,27 @@ class UserState:
         CLI spawns a process, and a hosted provider makes a billable call.
         """
         return 0.0 if self.settings.llm.provider == "vscode" else self.PROBE_TTL_S
+
+    def provider_status(self) -> Any:
+        """The provider's status, ignoring a single blip.
+
+        The bridge is probed live on every poll, so one slow answer -- VS Code
+        busy, or the handshake being rewritten -- used to flip the whole UI to
+        "no model" and raise the setup alert, only for the next poll to clear
+        it. A failure has to repeat before it is believed.
+        """
+        status = self.probe(
+            "provider", lambda: self.llm().status(), ttl=self.provider_probe_ttl()
+        )
+        if getattr(status, "available", False):
+            self._last_good_provider = status
+            self._provider_failures = 0
+            return status
+
+        self._provider_failures += 1
+        if self._provider_failures < 2 and self._last_good_provider is not None:
+            return self._last_good_provider
+        return status
 
     def llm(self, provider_key: str | None = None, *, duration_s: float = 0.0) -> LLMClient:
         return LLMClient.from_settings(self.settings, provider_key, duration_s=duration_s)
@@ -669,12 +693,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload.append(item)
         return payload
 
+    def with_credits(payload: dict[str, Any]) -> dict[str, Any]:
+        """Price the recorded tokens on read, so a rate change reprices history."""
+        tokens = payload.get("tokens")
+        if isinstance(tokens, dict) and tokens.get("total_tokens"):
+            payload["tokens"] = {**tokens, **credits_for_tokens(tokens)}
+        return payload
+
     def project_payload(project: Project) -> dict[str, Any]:
-        return {
-            **project.meta.to_dict(),
-            "artifacts": artifact_payload(project),
-            "source_exists": project.source_path.is_file(),
-        }
+        return with_credits(
+            {
+                **project.meta.to_dict(),
+                "artifacts": artifact_payload(project),
+                "source_exists": project.source_path.is_file(),
+            }
+        )
 
     # --- health & setup ----------------------------------------------------
     @app.get("/api/health")
@@ -686,11 +719,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app_state.settings.paths.vendor_dir, app_state.settings.transcription.model
             ),
         )
-        provider = app_state.probe(
-            "provider",
-            lambda: app_state.llm().status(),
-            ttl=app_state.provider_probe_ttl(),
-        )
+        provider = app_state.provider_status()
         ready = tools is not None
         return {
             "version": __version__,
@@ -1396,7 +1425,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- projects ----------------------------------------------------------
     @app.get("/api/projects")
     def list_projects(app_state: UserState = Depends(current)) -> list[dict[str, Any]]:
-        return [meta.to_dict() for meta in app_state.store.list()]
+        return [with_credits(meta.to_dict()) for meta in app_state.store.list()]
 
     @app.post("/api/projects", status_code=201)
     async def create_project(

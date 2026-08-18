@@ -885,6 +885,50 @@ counts with the model's own tokenizer, and hosted APIs report usage. Where it
 does not, the figure is estimated from character counts and marked with `~`,
 because a guess presented as a fact is worse than no number.
 
+If the bridge running inside VS Code is older than the one installed, ClipDesk
+says so on the settings screen. VS Code caches the extension until the window is
+reloaded, so a new bridge on disk is not a new bridge running — and the only
+symptom is token counts quietly falling back to estimates.
+
+### What that costs in credits
+
+Beside *Tokens* is a *Credits* column: the same usage priced as **GitHub AI
+Credits**, which is how Copilot usage has been billed since GitHub moved to
+usage-based billing on 1 June 2026. One credit is $0.01, and every model has its
+own input and output rate per million tokens — so the same work costs very
+different amounts depending on who answers:
+
+| Model | Input $/1M | Output $/1M |
+| --- | ---: | ---: |
+| GPT-5 mini | 0.25 | 2.00 |
+| Gemini 3.5 Flash | 1.50 | 9.00 |
+| Grok 4.6 | 2.00 | 6.00 |
+| Claude Sonnet 4.6 | 3.00 | 15.00 |
+| Claude Opus 5 | 5.00 | 25.00 |
+
+That spread is the reason the slider bothers routing each pass to a size rather
+than sending everything to the best model available: an output token from Opus 5
+costs **twelve and a half times** one from GPT-5 mini.
+
+Two things the figure deliberately does not do, because the gap against a real
+GitHub bill has to be explainable:
+
+- **Cached input is not counted.** Copilot charges a tenth of the input rate for
+  tokens the model reuses, and the bridge does not report how many were cached.
+  Every input token is priced at the full rate, so the number is a ceiling.
+- **The auto-selection discount is not applied.** GitHub takes 10% off when *its*
+  auto model selection picks the model. ClipDesk picking the model is a different
+  thing, and claiming the discount would understate the bill.
+
+A model with no published rate is named in the hover rather than priced at zero,
+and the total carries `~`. Rates live in one table in
+[clipdesk/llm/credits.py](clipdesk/llm/credits.py); because credits are worked
+out when the Library is read rather than frozen when the call was made, editing
+that table reprices everything already recorded.
+
+Code completions are not billed in credits at all, and ClipDesk does not make
+any.
+
 To see how your own models would be graded:
 
 ```powershell

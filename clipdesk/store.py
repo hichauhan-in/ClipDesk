@@ -224,6 +224,11 @@ class Project:
             running = by_task.setdefault(task, {"calls": 0, "prompt": 0, "completion": 0})
             for key in ("calls", "prompt", "completion"):
                 running[key] = running.get(key, 0) + entry.get(key, 0)
+        by_model = dict(current.get("by_model") or {})
+        for model, entry in (usage.get("by_model") or {}).items():
+            running = by_model.setdefault(model, {"calls": 0, "prompt": 0, "completion": 0})
+            for key in ("calls", "prompt", "completion"):
+                running[key] = running.get(key, 0) + entry.get(key, 0)
         self.meta.tokens = {
             "calls": current.get("calls", 0) + usage.get("calls", 0),
             "prompt_tokens": current.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0),
@@ -234,6 +239,7 @@ class Project:
             # One estimated call makes the whole total an estimate.
             "measured": bool(current.get("measured", True)) and bool(usage.get("measured", True)),
             "by_task": by_task,
+            "by_model": by_model,
             "models": sorted({*(current.get("models") or []), *(usage.get("models") or [])}),
         }
         self.save()

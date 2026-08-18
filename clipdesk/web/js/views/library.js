@@ -48,6 +48,35 @@ function tokenCell(tokens) {
   );
 }
 
+/** What those tokens cost, in the AI credits GitHub bills Copilot usage in. */
+function creditCell(tokens) {
+  if (!tokens?.total_tokens) return h("td.nowrap.faint.small", "—");
+  const credits = tokens.credits ?? 0;
+  const unpriced = tokens.unpriced || [];
+  // Everything priced but rounding to zero is real: a small model answering a
+  // short prompt genuinely costs a fraction of a cent.
+  if (!credits && !unpriced.length) return h("td.nowrap.faint.small", "<0.01");
+
+  const lines = Object.entries(tokens.by_model || {})
+    .map(([model, entry]) => [model, entry, (entry.prompt + entry.completion) || 0])
+    .sort((a, b) => b[2] - a[2])
+    .map(([model, entry]) => `${model}: ${(entry.prompt + entry.completion).toLocaleString()} tokens`);
+  lines.push(`1 credit = $0.01 — about $${(tokens.usd ?? credits * 0.01).toFixed(2)}`);
+  if (unpriced.length) lines.push(`No published price for: ${unpriced.join(", ")}`);
+  // The two ways this can differ from a GitHub bill, said rather than hidden.
+  lines.push("Cached input is charged less and is not counted here, so this is a ceiling.");
+  if (!tokens.measured) lines.push("Based on estimated tokens, so the cost is estimated too.");
+
+  return h(
+    "td.nowrap",
+    { title: lines.join("\n") },
+    h("span", credits.toFixed(2)),
+    unpriced.length || !tokens.measured
+      ? h("span.faint", { style: { marginLeft: "3px" } }, "~")
+      : null
+  );
+}
+
 const LINK_LABEL = {
   youtube: "YouTube",
   sharepoint: "SharePoint / Stream",
@@ -971,6 +1000,7 @@ function projectList(projects, ctx) {
           h("th", "Length"),
           h("th", "Size"),
           h("th", "Tokens"),
+          h("th", { title: "GitHub AI Credits — 1 credit = $0.01" }, "Credits"),
           h("th", "Added"),
           h("th", "Status"),
           h("th", "")
@@ -1003,6 +1033,7 @@ function projectList(projects, ctx) {
             h("td.nowrap", duration(project.duration_s)),
             h("td.nowrap", bytes(project.size_bytes)),
             tokenCell(project.tokens),
+            creditCell(project.tokens),
             h("td.nowrap.faint.small", relativeTime(project.created_at)),
             h(
               "td",

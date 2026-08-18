@@ -2,9 +2,11 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from clipdesk.config import VSCodeLLMConfig
 from clipdesk.llm.base import ChatMessage
-from clipdesk.llm.vscode_bridge import VSCodeBridgeProvider
+from clipdesk.llm.vscode_bridge import BRIDGE_VERSION, VSCodeBridgeProvider, _is_older
 
 
 def test_model_effort_and_context_are_forwarded_to_the_bridge(monkeypatch):
@@ -40,3 +42,29 @@ def test_model_effort_and_context_are_forwarded_to_the_bridge(monkeypatch):
     assert captured["body"]["model"] == "gpt-test"
     assert captured["body"]["reasoning_effort"] == "high"
     assert captured["body"]["context_window_tokens"] == 128000
+@pytest.mark.parametrize(
+    "running, older",
+    [
+        ("", True),  # predates the bridge reporting a version at all
+        ("0.1.4", True),
+        ("0.1.5", False),
+        ("0.2.0", False),
+        ("0.1.10", False),  # compared as numbers, not as text
+    ],
+)
+def test_an_older_bridge_running_in_vs_code_is_spotted(running, older):
+    """VS Code caches the extension module until the window is reloaded.
+
+    Installing a new bridge changes the file without changing what executes, and
+    the symptom is silent: token counts fall back to estimates with nothing said.
+    """
+    assert _is_older(running, "0.1.5") is older
+
+
+def test_the_expected_bridge_version_matches_the_manifest():
+    """A bump in one place and not the other would warn forever, or never."""
+    import json
+    from pathlib import Path
+
+    manifest = Path(__file__).resolve().parent.parent / "vscode-bridge" / "package.json"
+    assert json.loads(manifest.read_text(encoding="utf-8"))["version"] == BRIDGE_VERSION

@@ -16,6 +16,8 @@ const main = document.getElementById("main");
 const nav = document.getElementById("nav");
 const statusPill = document.getElementById("statusPill");
 let routeGeneration = 0;
+//: The route last drawn, so a re-route onto the same page is treated as a refresh.
+let lastRouteKey = null;
 
 const ctx = {
   navigate(hash) {
@@ -42,17 +44,27 @@ function parseRoute() {
 async function route() {
   const generation = ++routeGeneration;
   const { parts, params } = parseRoute();
-  mount(
-    main,
-    loadingView(
-      parts[0] === "settings"
-        ? "Checking what is installed…"
-        : parts[0] === "project"
-          ? "Opening the project…"
-          : "Loading…",
-      { cards: parts[0] === "settings" ? 4 : 2 }
-    )
-  );
+  // Finishing a job re-routes the page the user is already on. That is a
+  // refresh, not a navigation: showing the skeleton and scrolling to the top
+  // would throw them out of whatever they were reading.
+  const key = `${parts.join("/")}?${params.get("tab") || ""}`;
+  const sameRoute = key === lastRouteKey;
+  lastRouteKey = key;
+  const keptScroll = sameRoute ? { main: main.scrollTop, page: window.scrollY } : null;
+
+  if (!sameRoute) {
+    mount(
+      main,
+      loadingView(
+        parts[0] === "settings"
+          ? "Checking what is installed\u2026"
+          : parts[0] === "project"
+            ? "Opening the project\u2026"
+            : "Loading\u2026",
+        { cards: parts[0] === "settings" ? 4 : 2 }
+      )
+    );
+  }
   drawNav(parts, generation);
   const staged = document.createDocumentFragment();
   const routeCtx = {
@@ -79,7 +91,12 @@ async function route() {
   }
   if (generation !== routeGeneration) return;
   mount(main, staged);
-  main.scrollTop = 0;
+  if (keptScroll) {
+    main.scrollTop = keptScroll.main;
+    window.scrollTo(0, keptScroll.page);
+  } else {
+    main.scrollTop = 0;
+  }
 }
 
 function navButton(label, { active, onclick }) {

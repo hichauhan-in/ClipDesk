@@ -835,3 +835,25 @@ def test_an_overridden_port_reaches_the_settings(monkeypatch, tmp_path):
     # the browser is not using.
     assert captured["origins"] == 9911
     assert captured["should_exit"] is True
+
+
+def test_one_blip_from_the_bridge_does_not_report_no_model(client, monkeypatch):
+    """The bridge is probed live on every poll, so a slow answer is normal.
+
+    Reporting it as down flipped the whole UI to "no model" and raised the setup
+    alert, only for the next poll to clear it. It has to repeat to be believed.
+    """
+    from types import SimpleNamespace
+
+    from clipdesk.server import app as app_module
+
+    state = client.app.state.clipdesk.authenticate({})
+    good = SimpleNamespace(available=True, to_dict=lambda: {"available": True})
+    bad = SimpleNamespace(available=False, to_dict=lambda: {"available": False})
+
+    answers = [good, bad, bad]
+    monkeypatch.setattr(state, "probe", lambda *a, **k: answers.pop(0))
+
+    assert state.provider_status() is good
+    assert state.provider_status() is good, "one failure should be ignored"
+    assert state.provider_status() is bad, "a repeat failure is believed"

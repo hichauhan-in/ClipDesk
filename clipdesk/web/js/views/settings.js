@@ -27,8 +27,6 @@ const COPILOT = [
   },
 ];
 
-const VIEW_KEY = "clipdesk.settings.view";
-
 export async function renderSettings(root, ctx) {
   // Basic needs only the cached health probe and the config file. Advanced also
   // probes every provider, which is the slow part, so it is fetched on demand.
@@ -44,7 +42,10 @@ export async function renderSettings(root, ctx) {
 
   const jobPanel = createJobPanel();
   const body = h("div");
-  let mode = localStorage.getItem(VIEW_KEY) === "advanced" ? "advanced" : "basic";
+  // Always Basic on arrival, however Settings was last left. Advanced is a
+  // place you go deliberately, so restoring it meant a refresh dropped people
+  // into the long form they had already finished with.
+  let mode = "basic";
   let setupRequest = null;
 
   /**
@@ -86,7 +87,6 @@ export async function renderSettings(root, ctx) {
 
   async function setMode(next) {
     mode = next;
-    localStorage.setItem(VIEW_KEY, next);
     for (const button of toggle.children) {
       button.setAttribute("aria-selected", String(button.dataset.view === next));
     }

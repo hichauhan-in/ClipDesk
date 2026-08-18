@@ -58,6 +58,8 @@ class TokenMeter:
         self.measured = True
         self.by_task: dict[str, dict[str, int]] = {}
         self.models: set[str] = set()
+        #: Per model, because credits are priced against the model that answered.
+        self.by_model: dict[str, dict[str, int]] = {}
 
     @property
     def total(self) -> int:
@@ -75,6 +77,12 @@ class TokenMeter:
             entry["completion"] += usage.completion_tokens
             if model:
                 self.models.add(model)
+                priced = self.by_model.setdefault(
+                    model, {"calls": 0, "prompt": 0, "completion": 0}
+                )
+                priced["calls"] += 1
+                priced["prompt"] += usage.prompt_tokens
+                priced["completion"] += usage.completion_tokens
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
@@ -85,6 +93,7 @@ class TokenMeter:
                 "total_tokens": self.total,
                 "measured": self.measured,
                 "by_task": {task: dict(entry) for task, entry in self.by_task.items()},
+                "by_model": {name: dict(entry) for name, entry in self.by_model.items()},
                 "models": sorted(self.models),
             }
 
