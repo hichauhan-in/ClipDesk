@@ -108,6 +108,10 @@ class LLMConfig(BaseModel):
     auto: bool = True
     #: 0 spends the fewest tokens, 4 spends the most. Ignored when auto is off.
     budget_level: int = Field(default=2, ge=0, le=4)
+    #: Which model to prefer within each tier, keyed "small"/"balanced"/"strong".
+    #: Lets someone pick the Gemini, Grok or GPT equivalent without giving up
+    #: auto. Ignored if the model stops being offered or changes tier.
+    tier_models: dict[str, str] = Field(default_factory=dict)
     vscode: VSCodeLLMConfig = Field(default_factory=VSCodeLLMConfig)
     copilot_cli: CopilotCliConfig = Field(default_factory=CopilotCliConfig)
     openai_compat: OpenAICompatConfig = Field(default_factory=OpenAICompatConfig)
@@ -172,6 +176,10 @@ class IngestConfig(BaseModel):
     #: Reuse the sign-in from this browser for links that need one. Empty = off.
     browser_cookies: str = ""
     max_download_mb: int = 8192
+    #: Which YouTube player clients the extractor may use, best first. Exposed
+    #: because YouTube breaks them from time to time and the working set changes
+    #: faster than releases do. Empty = leave the extractor to its own default.
+    youtube_player_clients: str = "web_safari,web,mweb"
 
 
 class Settings(BaseModel):

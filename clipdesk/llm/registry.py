@@ -66,11 +66,13 @@ class LLMClient:
         json_retries: int = 2,
         budget: Budget | None = None,
         meter: TokenMeter | None = None,
+        tier_models: dict[str, str] | None = None,
     ) -> None:
         self.provider = provider
         self.json_retries = max(0, json_retries)
         self.budget = budget
         self.meter = meter or TokenMeter()
+        self.tier_models = dict(tier_models or {})
         #: Which activity the next calls belong to, for the per-project total.
         self.task = "analyse"
         #: Model list, fetched once. Asking the provider per call is a round trip.
@@ -95,6 +97,7 @@ class LLMClient:
             json_retries=settings.analysis.json_retries,
             budget=budget,
             meter=meter,
+            tier_models=settings.llm.tier_models,
         )
 
     def for_task(self, task: str) -> LLMClient:
@@ -145,7 +148,8 @@ class LLMClient:
                 self._models = list(self.provider.status().models)
             except Exception:  # noqa: BLE001
                 self._models = []
-        return pick_model(self._models, self.budget.tier_for(self.task)) or None
+        tier = self.budget.tier_for(self.task)
+        return pick_model(self._models, tier, self.tier_models.get(tier, "")) or None
 
     def _active_model(self) -> str:
         try:

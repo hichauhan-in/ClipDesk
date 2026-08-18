@@ -923,15 +923,22 @@ button.choice .row { gap: 8px; flex-wrap: wrap; }
    what the setting would be. */
 .model-controls.is-locked { opacity: 0.45; pointer-events: none; }
 .auto-plan { margin-top: 12px; }
-.auto-plan-rows {
-  margin-top: 6px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+.auto-plan-table {
+  margin-top: 6px; table-layout: fixed;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  border-collapse: separate; border-spacing: 0;
 }
-.auto-plan-row {
-  display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
-  padding: 6px 10px; border-bottom: 1px solid var(--border-soft);
+.auto-plan-table th, .auto-plan-table td {
+  padding: 6px 10px; vertical-align: middle;
+  border-bottom: 1px solid var(--border-soft);
 }
-.auto-plan-row:last-child { border-bottom: 0; }
-.auto-plan-row .mono { color: var(--text-dim); }
+.auto-plan-table tr:last-child td { border-bottom: 0; }
+/* Fixed tracks: the size column holds "balanced", so letting it size to its
+   content would shuffle the dropdowns left and right from row to row. */
+.auto-plan-table th:first-child, .auto-plan-table td:first-child { width: 30%; }
+.auto-plan-table th:last-child, .auto-plan-table td:last-child { width: 88px; }
+.auto-plan-table select { width: 100%; padding: 4px 8px; font-size: 12px; }
+.auto-plan-table tbody tr:hover { background: none; }
 
 /* --- queue ------------------------------------------------------------- */
 .run-row { gap: 8px; align-items: center; flex-wrap: wrap; }

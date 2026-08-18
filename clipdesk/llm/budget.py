@@ -263,7 +263,7 @@ def _words(name: str) -> set[str]:
 def rank_models(models: list[str]) -> dict[str, list[str]]:
     """Split the available models into small / balanced / strong."""
     tiers: dict[str, list[str]] = {"small": [], "balanced": [], "strong": []}
-    for name in models:
+    for name in dict.fromkeys(models):  # providers do repeat themselves
         words = _words(name)
         lowered = name.lower()
         # Cheap wins ties: "gpt-5-mini" is a small model from a large family.
@@ -276,19 +276,38 @@ def rank_models(models: list[str]) -> dict[str, list[str]]:
     return tiers
 
 
-def pick_model(models: list[str], tier: str) -> str:
-    """The best match for a tier, falling back towards the middle."""
+def tier_options(models: list[str], tier: str) -> list[str]:
+    """Every model that would serve for a tier, best match first.
+
+    The fallback order matters: falling towards the middle rather than to an
+    extreme means a missing small model does not silently promote a cheap pass
+    to the dearest thing on offer.
+    """
     if not models:
-        return ""
+        return []
     tiers = rank_models(models)
-    # Fall towards balanced rather than to an extreme: a missing small model
-    # should not silently promote a cheap pass to the most expensive one.
     order = {
         "small": ("small", "balanced", "strong"),
         "balanced": ("balanced", "small", "strong"),
         "strong": ("strong", "balanced", "small"),
     }[tier]
+    ranked: list[str] = []
     for name in order:
-        if tiers[name]:
-            return tiers[name][0]
-    return models[0]
+        ranked += tiers[name]
+    return ranked
+
+
+def pick_model(models: list[str], tier: str, preferred: str = "") -> str:
+    """The model to use for a tier, honouring a choice the user made for it.
+
+    A stored preference only counts while it is still offered and still belongs
+    to the tier it was chosen for; otherwise the tier's own best match is used,
+    because a "cheapest" pass quietly running on an expensive model is exactly
+    what this is meant to prevent.
+    """
+    options = tier_options(models, tier)
+    if not options:
+        return ""
+    if preferred and preferred in rank_models(models).get(tier, []):
+        return preferred
+    return options[0]

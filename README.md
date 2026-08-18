@@ -412,10 +412,39 @@ sitting on the machine.
 | **OneDrive link** | Yes | Public shares directly; tenant shares after sign-in |
 | **A shared folder link** | Yes | Contents are listed so you can choose |
 | **Google Drive** | Yes | Set sharing to "Anyone with the link" |
-| **YouTube** | Yes | Uses the media extractor |
+| **YouTube** | Yes | Uses the media extractor — see the note on Node.js below |
 | **Vimeo, Loom, Panopto, Kaltura, Echo360** | Yes | Uses the media extractor |
 | **Direct file URL** | Yes | Fastest path — a plain streamed download |
 | **Upload** | Yes | Drag and drop, with an optional `.srt`/`.vtt` |
+
+### YouTube needs Node.js installed
+
+YouTube signs its download URLs with a challenge that only runs as JavaScript.
+The extractor can solve it, but only with a JavaScript runtime available, and
+the one it enables by default — deno — is not something most machines have. So
+the practical requirement is **[Node.js](https://nodejs.org)**: install it and
+ClipDesk finds it on `PATH` by itself, with nothing to configure.
+
+Without one, the challenge goes unsolved, the usable formats are dropped, and
+the download ends as `HTTP Error 403: Forbidden` — which reads like a sign-in
+problem and is not one. ClipDesk checks for a runtime before blaming your
+session, so the message says which it is.
+
+Separately, ClipDesk pins which YouTube player clients the extractor may use,
+because its default resolves to one whose media URLs are refused. When YouTube
+next changes this, the working set can be swapped without a code change:
+
+```yaml
+# config/local.yaml
+ingest:
+  youtube_player_clients: web_safari,web,mweb   # empty = extractor's own default
+```
+
+To find out which still work:
+
+```powershell
+.\.venv\Scripts\python.exe tools\probe_youtube.py [URL]
+```
 
 ### Getting to tenant content
 
@@ -817,6 +846,32 @@ because otherwise they would pay the per-window overhead dozens more times.
 Turning the slider off hands model, reasoning effort and context window back to
 you, exactly as before.
 
+### Choosing the model yourself, without turning auto off
+
+Underneath the slider is the plan: the four passes, the size each one asks for,
+and the model answering it. Each row is a dropdown whose first entry is the
+automatic pick, named — `claude-sonnet-4.6 — automatic`, not "choose for me" —
+so the row reads as an answer whether or not you have touched it. Below it are
+the rest of your models of that size, for when two providers both offer
+something capable and you would rather spend on one of them:
+
+| Pass | Size | Dropdown |
+| --- | --- | --- |
+| Analysis | small | `gemini-3.5-flash — automatic`, `gpt-5-mini`, `claude-haiku-4.5`, … |
+| Notes | balanced | `claude-sonnet-4.6 — automatic`, `grok-4.6`, `claude-sonnet-5`, … |
+| Article | balanced | `claude-sonnet-4.6 — automatic`, `grok-4.6`, `claude-sonnet-5`, … |
+| Clip search | small | `gemini-3.5-flash — automatic`, `gpt-5-mini`, `claude-haiku-4.5`, … |
+
+The choice is per *size*, not per pass, so at Balanced picking a model for Notes
+picks it for the Article too — they are asking for the same thing. The panel
+says so rather than letting you find out. Move the slider and the sizes change,
+so the same choice may now apply to a different set of passes.
+
+Leaving a row on its automatic entry keeps the pick up to date as your
+provider's line-up changes; naming a model pins it. Choices live in
+`llm.tier_models` in `config/local.yaml`, and a model you no longer have is
+ignored rather than failing the run.
+
 ### Knowing what was spent
 
 The **Library** has a *Tokens* column beside Length and Size, totalled per
@@ -1151,6 +1206,14 @@ of the other three routes.
 
 **"The media extractor is not installed"** — open Settings → Dependencies and
 install it. Without it, only direct file links work.
+
+**A YouTube link fails with `HTTP Error 403: Forbidden`** — install
+[Node.js](https://nodejs.org). YouTube signs its downloads with a JavaScript
+challenge, and without a runtime to solve it the formats are dropped and the
+request is refused. It looks like a sign-in problem and is not one. If it still
+fails afterwards, run `.\.venv\Scripts\python.exe tools\probe_youtube.py` to see
+which player clients currently work and set `ingest.youtube_player_clients`
+accordingly.
 
 **Analysis finished but there are no chapters** — the report's warnings say why.
 Usually the provider was unreachable, or the Copilot CLI hit one of its bad

@@ -162,7 +162,7 @@ from clipdesk.ingest.sharepoint import (
 from clipdesk.llm import PRESETS, LLMClient, all_statuses, extension_state
 from clipdesk.llm.budget import LEVELS as BUDGET_LEVELS
 from clipdesk.llm.budget import TASKS as BUDGET_TASKS
-from clipdesk.llm.budget import TASK_LABELS, budget_for, pick_model
+from clipdesk.llm.budget import TASK_LABELS, budget_for, pick_model, rank_models
 from clipdesk.llm.presets import get as get_preset
 from clipdesk.llm.registry import build_provider
 from clipdesk.media.ffmpeg import find_tools
@@ -781,7 +781,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         routes the calls is the same one the user is shown.
         """
         settings = app_state.settings
-        chosen = settings.llm_budget_level if level is None else max(0, min(4, level))
+        chosen = settings.llm.budget_level if level is None else max(0, min(4, level))
         budget = budget_for(chosen)
         try:
             models = list(build_provider(settings.llm).status().models)
@@ -800,7 +800,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "task": task,
                     "label": TASK_LABELS[task],
                     "tier": budget.tier_for(task),
-                    "model": pick_model(models, budget.tier_for(task)),
+                    "model": pick_model(
+                        models,
+                        budget.tier_for(task),
+                        settings.llm.tier_models.get(budget.tier_for(task), ""),
+                    ),
+                    # What auto lands on with no preference, reported separately
+                    # so the control can name the default even while overridden.
+                    "automatic": pick_model(models, budget.tier_for(task), ""),
+                    # Blank unless the user has picked one, so the control can
+                    # tell an override apart from agreeing with the default.
+                    "chosen": settings.llm.tier_models.get(budget.tier_for(task), ""),
+                    # Everything of a similar size, so a Gemini, Grok or GPT
+                    # equivalent can be chosen without leaving auto.
+                    "options": rank_models(models).get(budget.tier_for(task), []),
                 }
                 for task in BUDGET_TASKS
             ],
@@ -815,6 +828,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "llm_provider": settings.llm.provider,
             "llm_auto": settings.llm.auto,
             "llm_budget_level": settings.llm.budget_level,
+            "llm_tier_models": dict(settings.llm.tier_models),
             "llm_budget_levels": [
                 {
                     "level": item.level,
@@ -919,6 +933,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             put("llm", "auto", update.llm_auto)
         if update.llm_budget_level is not None:
             put("llm", "budget_level", update.llm_budget_level)
+        if update.llm_tier_models is not None:
+            # Settings files are deep-merged, so a key left out is a key kept.
+            # All three are written every time, with "" meaning "choose for me",
+            # otherwise a preference could never be undone.
+            current = dict(app_state.settings.llm.tier_models)
+            current.update(update.llm_tier_models)
+            put(
+                "llm",
+                "tier_models",
+                {tier: str(current.get(tier, "") or "") for tier in ("small", "balanced", "strong")},
+            )
         if update.llm_model is not None:
             put("llm", "vscode", "model", update.llm_model or None)
         if update.vscode_reasoning_effort is not None:
@@ -1331,6 +1356,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     browser_cookies=browser,
                     cookie_file=cookie_file,
                     max_mb=settings.ingest.max_download_mb,
+                    youtube_clients=settings.ingest.youtube_player_clients,
                 )
             except FetchError as exc:
                 project.meta.status = "failed"
@@ -2539,6 +2565,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             browser_cookies=settings.ingest.browser_cookies,
                             cookie_file=cookie_file,
                             max_mb=settings.ingest.max_download_mb,
+                            youtube_clients=settings.ingest.youtube_player_clients,
                         )
                         destination = store_media(result.path, project, preferred_name)
                 except (FetchError, ValueError) as exc:

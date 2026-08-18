@@ -379,26 +379,75 @@ function modelCard(setup, settings, ctx) {
       mount(planBox);
       return;
     }
+    let plan;
     try {
-      const plan = await api.llmPlan(level);
-      mount(
-        planBox,
-        h("div.faint.small", `Auto is using these for “${plan.label}”:`),
-        h(
-          "div.auto-plan-rows",
-          plan.tasks.map((task) =>
-            h(
-              "div.auto-plan-row",
-              h("span.small", task.label),
-              h("span.small.mono", task.model || "provider default"),
-              h("span.tag", task.tier)
-            )
-          )
-        )
-      );
+      plan = await api.llmPlan(level);
     } catch {
       mount(planBox, h("div.faint.small", "Could not read the model list from this provider."));
+      return;
     }
+
+    const shared = new Set(
+      plan.tasks
+        .map((task) => task.tier)
+        .filter((tier, index, all) => all.indexOf(tier) !== index)
+    );
+
+    const row = (task) => {
+      const choose = h(
+        "select",
+        // "" hands the choice back, which the stored setting has to be able to
+        // express: a preference you cannot undo is a trap. It is named after the
+        // model it resolves to, so the row reads as an answer either way.
+        h(
+          "option",
+          { value: "", selected: !task.chosen },
+          task.automatic ? `${task.automatic} — automatic` : "Automatic"
+        ),
+        task.options
+          // Already offered above, and the same name twice reads as a mistake --
+          // unless it is pinned, where dropping it would show a deliberate
+          // choice as automatic and then drift off it when the default moves.
+          .filter((name) => name !== task.automatic || name === task.chosen)
+          .map((name) => h("option", { value: name, selected: name === task.chosen }, name))
+      );
+      choose.onchange = async () => {
+        try {
+          // Stored against the size, not the pass: at this level two passes can
+          // share a tier, and they should not disagree about what "balanced" is.
+          await api.putSettings({ llm_tier_models: { [task.tier]: choose.value } });
+          refreshPlan(level);
+        } catch (error) {
+          toast(error.message, "err");
+        }
+      };
+      return h(
+        "tr",
+        h("td.small", task.label),
+        h("td", choose),
+        h(
+          "td",
+          h("span.tag", { title: `A ${task.tier} model is used for this pass.` }, task.tier)
+        )
+      );
+    };
+
+    mount(
+      planBox,
+      h("div.faint.small", `Auto is using these for “${plan.label}”:`),
+      h(
+        "table.auto-plan-table",
+        h("thead", h("tr", h("th", "Pass"), h("th", "Model"), h("th", "Size"))),
+        h("tbody", plan.tasks.map(row))
+      ),
+      shared.size
+        ? h(
+            "div.faint.small",
+            { style: { marginTop: "6px" } },
+            "Passes of the same size share a choice, so changing one changes the other."
+          )
+        : null
+    );
   }
 
   function drawBody() {

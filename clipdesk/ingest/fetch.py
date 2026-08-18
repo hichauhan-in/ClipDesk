@@ -41,6 +41,33 @@ _HTML_TYPES = ("text/html", "application/xhtml")
 
 SUPPORTED_BROWSERS = ("edge", "chrome", "firefox", "brave", "vivaldi", "opera", "safari")
 
+# YouTube signs its media URLs with a challenge that only runs as JavaScript, so
+# the extractor needs a runtime to solve it. Only deno is enabled by default and
+# almost nobody has deno; without one the formats are dropped and the download
+# ends as a 403 that reads like a sign-in problem. Named in yt-dlp's own order
+# of preference.
+JS_RUNTIMES = ("deno", "node", "bun", "quickjs")
+
+# The extractor's default client resolves to android_vr, whose media URLs 403.
+# These are the clients that actually serve bytes; listing several means one
+# going bad is a slower format rather than a failed download.
+YOUTUBE_CLIENTS = "web_safari,web,mweb"
+
+
+def _js_runtime_args() -> list[str]:
+    """``--js-runtimes`` for whatever is installed, or nothing if none is."""
+    args: list[str] = []
+    for runtime in JS_RUNTIMES:
+        found = shutil.which(runtime)
+        if found:
+            args += ["--js-runtimes", f"{runtime}:{found}"]
+    return args
+
+
+def js_runtime_available() -> bool:
+    return any(shutil.which(runtime) for runtime in JS_RUNTIMES)
+
+
 
 class FetchError(RuntimeError):
     """A download failed for a reason worth showing the user verbatim."""
@@ -223,6 +250,7 @@ def fetch_with_ytdlp(
     cookie_file: Path | None = None,
     timeout: float = 3600.0,
     max_mb: int = 0,
+    youtube_clients: str = YOUTUBE_CLIENTS,
 ) -> FetchResult:
     executable = _resolve_extractor(vendor_dir)
     if executable is None:
@@ -256,6 +284,10 @@ def fetch_with_ytdlp(
         "--print",
         "after_move:FINALPATH:%(filepath)s",
     ]
+    command += _js_runtime_args()
+    if youtube_clients:
+        # Scoped to the youtube extractor, so it is inert for every other site.
+        command += ["--extractor-args", f"youtube:player_client={youtube_clients}"]
     if ffmpeg_dir is not None:
         command += ["--ffmpeg-location", str(ffmpeg_dir)]
     if max_mb > 0:
@@ -325,7 +357,10 @@ def _parse_percent(text: str) -> float | None:
 
 def _ytdlp_error(tail: list[str], link: Link, browser_cookies: str) -> str:
     joined = "\n".join(tail[-8:])
-    lowered = joined.lower()
+    # Matched against everything captured, not just the shown tail: the runtime
+    # warning is printed before the download starts and the error that follows
+    # it can be many lines later.
+    lowered = "\n".join(tail).lower()
 
     # Chromium 127 wraps the cookie key so only the browser can unwrap it, so
     # reading Edge's or Chrome's cookie store now fails however the user asks.
@@ -341,7 +376,29 @@ def _ytdlp_error(tail: list[str], link: Link, browser_cookies: str) -> str:
             "Copy as cURL. That works without installing anything.\n\n"
             f"{joined}"
         )
+    # A missing JavaScript runtime also ends in 403, so it has to be ruled out
+    # before the sign-in advice below -- otherwise the user is sent to fetch
+    # cookies for a problem cookies cannot fix.
+    if "javascript runtime" in lowered or "challenge solving failed" in lowered:
+        return (
+            "This video needs a JavaScript runtime that is not installed. YouTube "
+            "signs its downloads with a challenge that only runs as JavaScript, and "
+            "without one the extractor is refused with a 403 that looks like a "
+            "sign-in problem.\n\n"
+            "Install Node.js from https://nodejs.org and try again — ClipDesk picks "
+            "it up automatically, and nothing else needs configuring.\n\n"
+            f"{joined}"
+        )
     if "sign in" in lowered or "login" in lowered or "cookies" in lowered or "403" in lowered:
+        if not js_runtime_available():
+            return (
+                "The download was refused, and no JavaScript runtime is installed. "
+                "YouTube signs its downloads with a challenge that only runs as "
+                "JavaScript, so that is the likely cause rather than sign-in.\n\n"
+                "Install Node.js from https://nodejs.org and try again. If it still "
+                "fails, use \"Paste a signed-in session\".\n\n"
+                f"{joined}"
+            )
         if not browser_cookies:
             return (
                 "That video needs a signed-in session. Use \"Paste a signed-in session\" "
@@ -372,6 +429,7 @@ def fetch(
     browser_cookies: str = "",
     cookie_file: Path | None = None,
     max_mb: int = 0,
+    youtube_clients: str = YOUTUBE_CLIENTS,
 ) -> FetchResult:
     """Download ``url`` into ``destination_dir``, choosing the best strategy.
 
@@ -396,6 +454,7 @@ def fetch(
             browser_cookies=browser_cookies,
             cookie_file=cookie_file,
             max_mb=max_mb,
+            youtube_clients=youtube_clients,
         )
     if browser_cookies:
         return fetch_with_ytdlp(
@@ -407,6 +466,7 @@ def fetch(
             browser_cookies=browser_cookies,
             cookie_file=cookie_file,
             max_mb=max_mb,
+            youtube_clients=youtube_clients,
         )
 
     try:
@@ -426,6 +486,7 @@ def fetch(
                 vendor_dir=vendor_dir,
                 cookie_file=cookie_file,
                 max_mb=max_mb,
+                youtube_clients=youtube_clients,
             )
         except FetchError as extractor_error:
             raise FetchError(f"{direct_error}\n\n{extractor_error}") from extractor_error

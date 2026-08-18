@@ -227,6 +227,8 @@ class SettingsUpdate(BaseModel):
     #: Let ClipDesk size requests and pick the model.
     llm_auto: bool | None = None
     llm_budget_level: int | None = Field(default=None, ge=0, le=4)
+    #: Preferred model within each size tier, keyed small/balanced/strong.
+    llm_tier_models: dict[str, str] | None = None
     llm_model: str | None = None
     vscode_reasoning_effort: Literal[
         "", "none", "minimal", "low", "medium", "high", "xhigh", "max"

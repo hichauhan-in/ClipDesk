@@ -15,6 +15,7 @@ from clipdesk.llm.budget import (
     budget_for,
     pick_model,
     rank_models,
+    tier_options,
 )
 from clipdesk.llm.registry import LLMClient
 from clipdesk.models import TranscriptSegment
@@ -166,6 +167,61 @@ def test_a_missing_tier_falls_towards_the_middle():
 def test_no_models_means_no_opinion():
     # An empty answer leaves the provider's own default in place.
     assert pick_model([], "small") == ""
+
+
+def test_a_provider_that_repeats_itself_is_only_listed_once():
+    assert rank_models(["gpt-4o", "gpt-4o", "gpt-4o-mini"])["balanced"] == ["gpt-4o"]
+
+
+# --- picking an equivalent within a tier -------------------------------------
+def test_every_model_of_the_same_size_is_offered():
+    models = ["gemini-3.5-flash", "gpt-5-mini", "claude-haiku-4.5", "gpt-4o", "claude-opus-5"]
+
+    options = tier_options(models, "small")
+
+    assert options[:3] == ["gemini-3.5-flash", "gpt-5-mini", "claude-haiku-4.5"]
+
+
+def test_a_chosen_equivalent_is_used_instead_of_the_default():
+    models = ["gemini-3.5-flash", "gpt-5-mini", "claude-haiku-4.5"]
+
+    assert pick_model(models, "small") == "gemini-3.5-flash"
+    assert pick_model(models, "small", "gpt-5-mini") == "gpt-5-mini"
+
+
+def test_a_choice_from_another_size_is_ignored():
+    # Letting a "strong" name stand in for the cheapest pass would undo the
+    # whole point of the budget.
+    models = ["gemini-3.5-flash", "claude-opus-5"]
+
+    assert pick_model(models, "small", "claude-opus-5") == "gemini-3.5-flash"
+
+
+def test_a_choice_the_provider_no_longer_offers_is_ignored():
+    assert pick_model(["gemini-3.5-flash"], "small", "gpt-5-mini") == "gemini-3.5-flash"
+
+
+def test_the_chosen_equivalent_reaches_the_provider():
+    provider = FakeProvider(models=("gemini-3.5-flash", "gpt-5-mini", "claude-opus-5"))
+    client = LLMClient(
+        provider, budget=budget_for(0), tier_models={"small": "gpt-5-mini"}
+    )
+
+    client.for_task("analyse").complete("s", "u")
+
+    assert provider.calls[0]["model"] == "gpt-5-mini"
+
+
+def test_passes_of_the_same_size_follow_the_same_choice():
+    provider = FakeProvider(models=("gemini-3.5-flash", "gpt-5-mini", "claude-opus-5"))
+    client = LLMClient(
+        provider, budget=budget_for(0), tier_models={"small": "gpt-5-mini"}
+    )
+
+    for task in ("analyse", "notes", "clips"):
+        client.for_task(task).complete("s", "u")
+
+    assert {call["model"] for call in provider.calls} == {"gpt-5-mini"}
 
 
 def test_the_mechanical_pass_goes_to_a_cheaper_model_than_the_writing():

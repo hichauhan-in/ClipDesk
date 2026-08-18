@@ -67,6 +67,66 @@ def test_copilot_model_settings_are_persisted(client):
     assert payload["copilot_cli_context_window"] == "long_context"
 
 
+def test_a_tier_model_choice_can_be_undone(client):
+    """One tier at a time, and "choose for me" has to actually stick.
+
+    Two bugs made this worth pinning: settings files are deep-merged, so a key
+    left out is a key kept, and the handler once read the settings the process
+    started with instead of the current ones -- which quietly resurrected a
+    cleared tier the next time any other tier was touched.
+    """
+    client.put("/api/settings", json={"llm_tier_models": {"small": "a-small-model"}})
+
+    after_second_tier = client.put(
+        "/api/settings", json={"llm_tier_models": {"strong": "a-strong-model"}}
+    )
+    assert after_second_tier.json()["llm_tier_models"] == {
+        "small": "a-small-model",
+        "balanced": "",
+        "strong": "a-strong-model",
+    }
+
+    cleared = client.put("/api/settings", json={"llm_tier_models": {"small": ""}})
+    assert cleared.json()["llm_tier_models"] == {
+        "small": "",
+        "balanced": "",
+        "strong": "a-strong-model",
+    }
+
+
+def test_the_auto_plan_describes_every_pass(client):
+    """The settings screen reads this to name the model behind each pass.
+
+    Called without a level it has to fall back to the saved one -- the reason
+    for the test, since the screen always sends one and the fallback was broken
+    without anything noticing.
+    """
+    client.put("/api/settings", json={"llm_budget_level": 3})
+
+    response = client.get("/api/llm/plan")
+
+    assert response.status_code == 200
+    plan = response.json()
+    assert plan["level"] == 3
+    assert [task["task"] for task in plan["tasks"]] == ["analyse", "notes", "article", "clips"]
+    for task in plan["tasks"]:
+        assert task["tier"] in {"small", "balanced", "strong"}
+        # Blank means nothing is pinned; the automatic pick is reported either
+        # way so the control can name the default even while it is overridden.
+        assert task["chosen"] == ""
+        assert set(task) >= {"label", "tier", "model", "automatic", "chosen", "options"}
+
+
+def test_the_auto_plan_follows_the_requested_level(client):
+    lean = client.get("/api/llm/plan?level=1").json()
+    best = client.get("/api/llm/plan?level=4").json()
+
+    assert lean["level"] == 1 and best["level"] == 4
+    # Bigger windows are the cheap end: fewer of them, so less repeated prompt.
+    assert lean["window_chars"] > best["window_chars"]
+    assert client.get("/api/llm/plan?level=99").json()["level"] == 4
+
+
 def test_an_unknown_reasoning_effort_is_refused(client):
     response = client.put(
         "/api/settings", json={"copilot_cli_reasoning_effort": "unlimited"}
