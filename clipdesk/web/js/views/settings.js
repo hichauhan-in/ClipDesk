@@ -196,6 +196,15 @@ function basicView(settings, health, jobPanel, ctx, goAdvanced) {
   const change = (title) =>
     h("button.btn.btn-sm.btn-ghost", { onclick: goAdvanced, title }, "Change");
 
+  const auto = settings.llm_auto !== false;
+  const level = (settings.llm_budget_levels || [])[settings.llm_budget_level ?? 2];
+  // In auto the passes run on different models, so naming one would be wrong.
+  const modelLine = auto
+    ? `${providerLabel} · ${level?.label || "Auto"}`
+    : llm?.active_model
+      ? `${providerLabel} · ${llm.active_model}`
+      : providerLabel;
+
   return h(
     "div.card",
     h(
@@ -238,12 +247,23 @@ function basicView(settings, health, jobPanel, ctx, goAdvanced) {
       }),
       summaryRow({
         label: "Language model",
-        value: llm?.active_model ? `${providerLabel} · ${llm.active_model}` : providerLabel,
-        status: llm
-          ? llm.available
-            ? h("span.pill.pill-good", h("i.dot"), "Ready")
-            : h("span.pill.pill-muted", h("i.dot"), "Not available")
-          : null,
+        value: modelLine,
+        status: [
+          h(
+            "span.tag",
+            {
+              title: auto
+                ? `ClipDesk picks the model and sizes each request. ${level?.note || ""}`.trim()
+                : "You have chosen the model and reasoning yourself.",
+            },
+            auto ? "Auto" : "Custom"
+          ),
+          llm
+            ? llm.available
+              ? h("span.pill.pill-good", h("i.dot"), "Ready")
+              : h("span.pill.pill-muted", h("i.dot"), "Not available")
+            : null,
+        ],
         action: change("Choose a different provider"),
       }),
       summaryRow({
@@ -349,10 +369,43 @@ function modelCard(setup, settings, ctx) {
 
   const body = h("div", { style: { marginTop: "14px" } });
 
+  // Auto picks a different model for each pass, so what it settled on is shown
+  // where the locked controls are, and follows the slider.
+  const planBox = h("div.auto-plan");
+  const lock = { auto: settings.llm_auto !== false, planBox };
+
+  async function refreshPlan(level) {
+    if (!lock.auto) {
+      mount(planBox);
+      return;
+    }
+    try {
+      const plan = await api.llmPlan(level);
+      mount(
+        planBox,
+        h("div.faint.small", `Auto is using these for “${plan.label}”:`),
+        h(
+          "div.auto-plan-rows",
+          plan.tasks.map((task) =>
+            h(
+              "div.auto-plan-row",
+              h("span.small", task.label),
+              h("span.small.mono", task.model || "provider default"),
+              h("span.tag", task.tier)
+            )
+          )
+        )
+      );
+    } catch {
+      mount(planBox, h("div.faint.small", "Could not read the model list from this provider."));
+    }
+  }
+
   function drawBody() {
     if (usingOther) mount(body, otherProviderPanel(setup, settings, statusByKey, ctx));
-    else if (active === "copilot_cli") mount(body, cliPanel(statusByKey[active], settings, statusByKey, ctx));
-    else mount(body, copilotPanel(statusByKey[active], settings, ctx));
+    else if (active === "copilot_cli")
+      mount(body, cliPanel(statusByKey[active], settings, statusByKey, ctx, lock));
+    else mount(body, copilotPanel(statusByKey[active], settings, ctx, lock));
   }
 
   const options = [
@@ -419,7 +472,11 @@ function modelCard(setup, settings, ctx) {
       { style: { marginBottom: "12px" } },
       "The transcript is the only thing sent to the model — never the video or the audio."
     ),
-    budgetPanel(settings),
+    budgetPanel(settings, (auto, level) => {
+      lock.auto = auto;
+      drawBody();
+      refreshPlan(level);
+    }),
     h("div.choices", cards),
     body
   );
@@ -430,7 +487,7 @@ function modelCard(setup, settings, ctx) {
  * request carries and which model answers it; turning it off hands both back to
  * the provider settings below.
  */
-function budgetPanel(settings) {
+function budgetPanel(settings, onChange) {
   const levels = settings.llm_budget_levels || [];
   if (!levels.length) return h("div");
 
@@ -474,13 +531,16 @@ function budgetPanel(settings) {
   slider.oninput = () => {
     level = Number(slider.value);
     paint();
+    onChange?.(auto.checked, level);
     save({ llm_budget_level: level });
   };
   auto.onchange = () => {
     paint();
+    onChange?.(auto.checked, level);
     save({ llm_auto: auto.checked });
   };
   paint();
+  onChange?.(auto.checked, level);
 
   return h(
     "div.subcard.budget-panel",
@@ -489,7 +549,7 @@ function budgetPanel(settings) {
       auto,
       h(
         "span",
-        h("strong", "Choose the model and request size for me"),
+        h("strong", "Auto — choose the model and request size for me"),
         h(
           "div.faint.small",
           "Sends the mechanical passes to a smaller model and sizes each request to " +
@@ -501,7 +561,27 @@ function budgetPanel(settings) {
   );
 }
 
-function copilotPanel(status, settings, ctx) {
+/**
+ * The model controls, disabled while auto is on, with what auto settled on
+ * shown underneath. The provider itself stays selectable either way — auto
+ * chooses from the models that provider offers, not between providers.
+ */
+function modelControls(lock, save, ...fields) {
+  const inputs = fields.flatMap((field) => [...field.querySelectorAll("select, input")]);
+  for (const input of inputs) input.disabled = Boolean(lock?.auto);
+  if (save) save.disabled = Boolean(lock?.auto);
+
+  return h(
+    "div",
+    h("div.model-controls", { class: lock?.auto ? "is-locked" : "" }, fields),
+    lock?.auto ? lock.planBox : null,
+    lock?.auto
+      ? null
+      : h("div", { style: { marginTop: "12px" } }, save)
+  );
+}
+
+function copilotPanel(status, settings, ctx, lock) {
   if (!status) return h("div");
 
   const models = [...new Set(status.models)];
@@ -515,33 +595,34 @@ function copilotPanel(status, settings, ctx) {
   const effort = effortSelect(settings.vscode_reasoning_effort);
   const context = contextTokenSelect(settings.vscode_context_window_tokens);
 
+  const save = h(
+    "button.btn.btn-sm.btn-primary",
+    {
+      onclick: async () => {
+        await api.putSettings({
+          llm_model: model.value,
+          vscode_reasoning_effort: effort.value,
+          vscode_context_window_tokens: Number(context.value),
+        });
+        toast("VS Code model settings saved.", "ok");
+        ctx.refresh();
+      },
+    },
+    "Save model settings"
+  );
+
   return h(
     "div.subcard",
     h("div.small", status.detail),
     status.setup_hint
       ? h("div.faint.small", { style: { marginTop: "6px" } }, status.setup_hint)
       : null,
-    h(
-      "div.model-controls",
+    modelControls(
+      lock,
+      save,
       h("label.field", h("span", "Model"), model),
       h("label.field", h("span", "Thinking effort"), effort),
       h("label.field", h("span", "Context window"), context)
-    ),
-    h(
-      "button.btn.btn-sm.btn-primary",
-      {
-        style: { marginTop: "12px" },
-        onclick: async () => {
-          await api.putSettings({
-            llm_model: model.value,
-            vscode_reasoning_effort: effort.value,
-            vscode_context_window_tokens: Number(context.value),
-          });
-          toast("VS Code model settings saved.", "ok");
-          ctx.refresh();
-        },
-      },
-      "Save model settings"
     )
   );
 }
@@ -553,7 +634,7 @@ function copilotPanel(status, settings, ctx) {
 // never run there is a small fallback list from the CLI's own documentation.
 const CLI_MODEL_FALLBACK = ["claude-sonnet-5", "claude-haiku-5", "gpt-5.4"];
 
-function cliPanel(status, settings, statusByKey, ctx) {
+function cliPanel(status, settings, statusByKey, ctx, lock) {
   if (!status) return h("div");
 
   const current = settings.copilot_cli_model || "";
@@ -584,33 +665,34 @@ function cliPanel(status, settings, statusByKey, ctx) {
     )
   );
 
+  const save = h(
+    "button.btn.btn-sm.btn-primary",
+    {
+      onclick: async () => {
+        await api.putSettings({
+          copilot_cli_model: model.value,
+          copilot_cli_reasoning_effort: effort.value,
+          copilot_cli_context_window: context.value,
+        });
+        toast("Copilot CLI model settings saved.", "ok");
+        ctx.refresh();
+      },
+    },
+    "Save model settings"
+  );
+
   return h(
     "div.subcard",
     h("div.small", status.detail),
     status.setup_hint
       ? h("div.faint.small", { style: { marginTop: "6px" } }, status.setup_hint)
       : null,
-    h(
-      "div.model-controls",
+    modelControls(
+      lock,
+      save,
       h("label.field", h("span", "Model"), model),
       h("label.field", h("span", "Thinking effort"), effort),
       h("label.field", h("span", "Context window"), context)
-    ),
-    h(
-      "button.btn.btn-sm.btn-primary",
-      {
-        style: { marginTop: "12px" },
-        onclick: async () => {
-          await api.putSettings({
-            copilot_cli_model: model.value,
-            copilot_cli_reasoning_effort: effort.value,
-            copilot_cli_context_window: context.value,
-          });
-          toast("Copilot CLI model settings saved.", "ok");
-          ctx.refresh();
-        },
-      },
-      "Save model settings"
     )
   );
 }

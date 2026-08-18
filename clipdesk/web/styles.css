@@ -919,6 +919,19 @@ button.choice .row { gap: 8px; flex-wrap: wrap; }
 .budget-panel { margin-bottom: 14px; }
 .budget-panel > label.check { align-items: flex-start; }
 .budget-body { gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+/* Auto owns these while it is on; showing them greyed says so without hiding
+   what the setting would be. */
+.model-controls.is-locked { opacity: 0.45; pointer-events: none; }
+.auto-plan { margin-top: 12px; }
+.auto-plan-rows {
+  margin-top: 6px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.auto-plan-row {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
+  padding: 6px 10px; border-bottom: 1px solid var(--border-soft);
+}
+.auto-plan-row:last-child { border-bottom: 0; }
+.auto-plan-row .mono { color: var(--text-dim); }
 
 /* --- queue ------------------------------------------------------------- */
 .run-row { gap: 8px; align-items: center; flex-wrap: wrap; }

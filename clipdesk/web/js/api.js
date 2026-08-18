@@ -73,7 +73,7 @@ export const api = {
   analyze: (id, body) => request(`/api/projects/${id}/analyze`, { method: "POST", body }),
   notes: (id, body) => request(`/api/projects/${id}/notes`, { method: "POST", body }),
   articleOptions: () => request("/api/article/options"),
-  article: (id, body) => request(`/api/projects/${id}/article`, { method: "POST", body }),
+  llmPlan: (level) => request(`/api/llm/plan?level=${level}`),  article: (id, body) => request(`/api/projects/${id}/article`, { method: "POST", body }),
   cleanupPlan: (id, body) =>
     request(`/api/projects/${id}/cleanup/plan`, { method: "POST", body }),
   cleanup: (id, body) => request(`/api/projects/${id}/cleanup`, { method: "POST", body }),

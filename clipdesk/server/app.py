@@ -161,7 +161,10 @@ from clipdesk.ingest.sharepoint import (
 )
 from clipdesk.llm import PRESETS, LLMClient, all_statuses, extension_state
 from clipdesk.llm.budget import LEVELS as BUDGET_LEVELS
+from clipdesk.llm.budget import TASKS as BUDGET_TASKS
+from clipdesk.llm.budget import TASK_LABELS, budget_for, pick_model
 from clipdesk.llm.presets import get as get_preset
+from clipdesk.llm.registry import build_provider
 from clipdesk.media.ffmpeg import find_tools
 from clipdesk.media.soundtrack import (
     AUDIO_SUFFIXES,
@@ -767,6 +770,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             label=f"Installing {component}",
         )
         return {"job_id": job.id, "kind": "provision", "project_id": "-"}
+
+    @app.get("/api/llm/plan")
+    def llm_plan(
+        level: int | None = None, app_state: UserState = Depends(current)
+    ) -> dict[str, Any]:
+        """What auto mode would use at a level, for the settings screen to show.
+
+        Worked out here rather than in the browser so the ranking that actually
+        routes the calls is the same one the user is shown.
+        """
+        settings = app_state.settings
+        chosen = settings.llm_budget_level if level is None else max(0, min(4, level))
+        budget = budget_for(chosen)
+        try:
+            models = list(build_provider(settings.llm).status().models)
+        except Exception:  # noqa: BLE001
+            models = []
+        return {
+            "level": budget.level,
+            "label": budget.label,
+            "note": budget.note,
+            "window_chars": budget.window_chars,
+            "notes_word_target": budget.notes_word_target,
+            "include_diagrams": budget.include_diagrams,
+            "max_enrichment": budget.max_enrichment,
+            "tasks": [
+                {
+                    "task": task,
+                    "label": TASK_LABELS[task],
+                    "tier": budget.tier_for(task),
+                    "model": pick_model(models, budget.tier_for(task)),
+                }
+                for task in BUDGET_TASKS
+            ],
+        }
 
     # --- settings ----------------------------------------------------------
     @app.get("/api/settings")

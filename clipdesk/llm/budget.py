@@ -37,6 +37,14 @@ from clipdesk.llm.base import Usage
 #: The tasks that spend tokens, in the order a user meets them.
 TASKS: tuple[str, ...] = ("analyse", "notes", "article", "clips")
 
+#: What each task is called on the settings screen.
+TASK_LABELS: dict[str, str] = {
+    "analyse": "Analysis",
+    "notes": "Notes",
+    "article": "Article",
+    "clips": "Clip search",
+}
+
 
 class TokenMeter:
     """Accumulates usage across the many calls one action makes."""
