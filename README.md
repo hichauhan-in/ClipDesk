@@ -431,16 +431,18 @@ problem and is not one. ClipDesk checks for a runtime before blaming your
 session, so the message says which it is.
 
 Separately, ClipDesk pins which YouTube player clients the extractor may use,
-because its default resolves to one whose media URLs are refused. When YouTube
-next changes this, the working set can be swapped without a code change:
+because its default resolves to one whose media URLs are refused. The choice
+also decides what quality you get: some clients only offer 360p for a given
+video, so a list can succeed and still be the wrong answer. When YouTube next
+changes this, the working set can be swapped without a code change:
 
 ```yaml
 # config/local.yaml
 ingest:
-  youtube_player_clients: web_safari,web,mweb   # empty = extractor's own default
+  youtube_player_clients: mweb,tv_simply,web_embedded,android   # empty = extractor's own default
 ```
 
-To find out which still work:
+To find out which still work, and at what resolution:
 
 ```powershell
 .\.venv\Scripts\python.exe tools\probe_youtube.py [URL]
@@ -1212,8 +1214,8 @@ install it. Without it, only direct file links work.
 challenge, and without a runtime to solve it the formats are dropped and the
 request is refused. It looks like a sign-in problem and is not one. If it still
 fails afterwards, run `.\.venv\Scripts\python.exe tools\probe_youtube.py` to see
-which player clients currently work and set `ingest.youtube_player_clients`
-accordingly.
+which player clients currently work and at what resolution, then set
+`ingest.youtube_player_clients` accordingly.
 
 **Analysis finished but there are no chapters** — the report's warnings say why.
 Usually the provider was unreachable, or the Copilot CLI hit one of its bad

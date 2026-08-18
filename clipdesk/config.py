@@ -179,7 +179,7 @@ class IngestConfig(BaseModel):
     #: Which YouTube player clients the extractor may use, best first. Exposed
     #: because YouTube breaks them from time to time and the working set changes
     #: faster than releases do. Empty = leave the extractor to its own default.
-    youtube_player_clients: str = "web_safari,web,mweb"
+    youtube_player_clients: str = "mweb,tv_simply,web_embedded,android"
 
 
 class Settings(BaseModel):

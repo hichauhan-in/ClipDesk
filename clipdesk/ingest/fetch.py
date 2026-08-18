@@ -49,9 +49,10 @@ SUPPORTED_BROWSERS = ("edge", "chrome", "firefox", "brave", "vivaldi", "opera", 
 JS_RUNTIMES = ("deno", "node", "bun", "quickjs")
 
 # The extractor's default client resolves to android_vr, whose media URLs 403.
-# These are the clients that actually serve bytes; listing several means one
-# going bad is a slower format rather than a failed download.
-YOUTUBE_CLIENTS = "web_safari,web,mweb"
+# These are the clients that actually serve bytes. The web ones are deliberately
+# absent: they still resolve, but for some videos they offer nothing above 360p,
+# so including them buys a download that succeeds at a quality nobody wanted.
+YOUTUBE_CLIENTS = "mweb,tv_simply,web_embedded,android"
 
 
 def _js_runtime_args() -> list[str]:
