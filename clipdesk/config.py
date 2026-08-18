@@ -103,6 +103,11 @@ class AnthropicConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     provider: str = "vscode"
+    #: Let ClipDesk size each request and pick the model. Off means the provider
+    #: settings below are used exactly as written.
+    auto: bool = True
+    #: 0 spends the fewest tokens, 4 spends the most. Ignored when auto is off.
+    budget_level: int = Field(default=2, ge=0, le=4)
     vscode: VSCodeLLMConfig = Field(default_factory=VSCodeLLMConfig)
     copilot_cli: CopilotCliConfig = Field(default_factory=CopilotCliConfig)
     openai_compat: OpenAICompatConfig = Field(default_factory=OpenAICompatConfig)

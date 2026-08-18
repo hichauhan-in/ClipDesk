@@ -2,7 +2,7 @@
 
 import { api, uploadProject } from "../api.js";
 import { confirmAction, debounce, h, mount, toast } from "../dom.js";
-import { bytes, duration, relativeTime } from "../format.js";
+import { bytes, compactCount, duration, relativeTime } from "../format.js";
 import { createJobPanel } from "../jobpanel.js";
 
 const STATUS_PILL = {
@@ -12,6 +12,41 @@ const STATUS_PILL = {
   failed: ["pill-bad", "Failed"],
   new: ["pill-muted", "Not analysed"],
 };
+
+const TASK_LABEL = {
+  analyse: "Analysis",
+  notes: "Notes",
+  article: "Article",
+  clips: "Clip search",
+};
+
+/** What this recording has cost in model tokens, with the breakdown on hover. */
+function tokenCell(tokens) {
+  const total = tokens?.total_tokens || 0;
+  if (!total) return h("td.nowrap.faint.small", "—");
+
+  const lines = Object.entries(tokens.by_task || {})
+    .sort((a, b) => b[1].prompt + b[1].completion - (a[1].prompt + a[1].completion))
+    .map(([task, entry]) => {
+      const label = TASK_LABEL[task] || task;
+      return `${label}: ${(entry.prompt + entry.completion).toLocaleString()} (${entry.calls} call${
+        entry.calls === 1 ? "" : "s"
+      })`;
+    });
+  lines.push(
+    `In ${tokens.prompt_tokens.toLocaleString()} · out ${tokens.completion_tokens.toLocaleString()}`
+  );
+  if (tokens.models?.length) lines.push(`Models: ${tokens.models.join(", ")}`);
+  // Say so when the provider did not count for us, rather than implying it did.
+  if (!tokens.measured) lines.push("Estimated — this provider does not report usage.");
+
+  return h(
+    "td.nowrap",
+    { title: lines.join("\n") },
+    h("span", compactCount(total)),
+    tokens.measured ? null : h("span.faint", { style: { marginLeft: "3px" } }, "~")
+  );
+}
 
 const LINK_LABEL = {
   youtube: "YouTube",
@@ -935,6 +970,7 @@ function projectList(projects, ctx) {
           h("th", "Title"),
           h("th", "Length"),
           h("th", "Size"),
+          h("th", "Tokens"),
           h("th", "Added"),
           h("th", "Status"),
           h("th", "")
@@ -966,6 +1002,7 @@ function projectList(projects, ctx) {
             ),
             h("td.nowrap", duration(project.duration_s)),
             h("td.nowrap", bytes(project.size_bytes)),
+            tokenCell(project.tokens),
             h("td.nowrap.faint.small", relativeTime(project.created_at)),
             h(
               "td",

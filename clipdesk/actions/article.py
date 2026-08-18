@@ -118,7 +118,6 @@ def _transcript(report: AnalysisReport, limit: int = _TRANSCRIPT_LIMIT) -> str:
         used += len(line) + 1
     return "\n".join(lines)
 
-
 def _parse(raw: str) -> dict[str, object]:
     match = _JSON_RE.search(raw)
     if match is None:
@@ -142,12 +141,13 @@ def write_article(
     extra_sections: list[str] | None = None,
     enrichment: int = 0,
     want_diagram: bool = False,
+    transcript_chars: int = 0,
 ) -> Article:
     """Ask the model for the article fields. One call: the fields cross-reference."""
     if shape not in ARTICLE_SHAPES:
         raise ValueError(f"Unknown article type: {shape}")
 
-    transcript = _transcript(report)
+    transcript = _transcript(report, transcript_chars or _TRANSCRIPT_LIMIT)
     if not transcript.strip():
         raise LLMError("There is no transcript to write an article from.")
 
@@ -319,9 +319,14 @@ def generate_article(
         raise ValueError(f"Unknown article format: {article_format}")
 
     level = max(0, min(max(ENRICHMENT_LEVELS), enrichment))
-    # Word has no way to render Mermaid, so a diagram is only worth asking for
-    # when the output is Markdown.
-    want_diagram = include_diagram and article_format == "md"
+    # Auto mode caps how much transcript is sent and how far enrichment may go.
+    budget = getattr(llm, "budget", None)
+    llm.for_task("article")
+    if budget:
+        level = min(level, budget.max_enrichment)
+    want_diagram = include_diagram and article_format == "md" and (
+        budget.include_diagrams if budget else True
+    )
 
     bus.stage_start(
         STAGE,
@@ -337,6 +342,7 @@ def generate_article(
         extra_sections=extra_sections,
         enrichment=level,
         want_diagram=want_diagram,
+        transcript_chars=budget.article_transcript_chars if budget else 0,
     )
 
     suffix = f".{article_format}"

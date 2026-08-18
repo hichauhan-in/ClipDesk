@@ -32,6 +32,14 @@ export function bytes(value) {
   return `${size.toFixed(size >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+/** 1234 → "1.2k". Token counts get large enough that digits stop being read. */
+export function compactCount(value) {
+  if (!value) return "—";
+  if (value < 1000) return String(value);
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
 export function relativeTime(iso) {
   if (!iso) return "";
   const then = new Date(iso).getTime();

@@ -14,6 +14,7 @@ from clipdesk.analysis.mermaid import repair_markdown
 from clipdesk.analysis.prompts import (
     ENRICHMENT_LABELS,
     ENRICHMENT_LEVELS,
+    LENGTH_HINT,
     MERMAID_HINT,
     NOTES_SYSTEM,
     NOTES_USER_TEMPLATE,
@@ -89,20 +90,28 @@ def _section_transcript(report: AnalysisReport, chapter: Chapter, limit: int = 1
 def _write_section(
     llm: LLMClient, report: AnalysisReport, chapter: Chapter, settings: Settings
 ) -> str:
-    transcript = _section_transcript(report, chapter)
+    budget = getattr(llm, "budget", None)
+    limit = budget.notes_section_chars if budget else 11000
+    transcript = _section_transcript(report, chapter, limit)
     if not transcript.strip():
         return ""
 
-    level = max(0, min(max(ENRICHMENT_LEVELS), settings.notes.enrichment))
+    ceiling = budget.max_enrichment if budget else max(ENRICHMENT_LEVELS)
+    level = max(0, min(ceiling, max(ENRICHMENT_LEVELS), settings.notes.enrichment))
+    diagrams = settings.notes.include_mermaid and (budget.include_diagrams if budget else True)
+    timestamps = settings.notes.include_timestamps and (
+        budget.include_timestamps if budget else True
+    )
     user = NOTES_USER_TEMPLATE.format(
         title=report.title or report.media.filename,
         section_title=chapter.title,
         start=format_timestamp(chapter.start),
         end=format_timestamp(chapter.end),
         transcript=transcript,
-        mermaid_hint=MERMAID_HINT if settings.notes.include_mermaid else "",
-        timestamp_hint=TIMESTAMP_HINT if settings.notes.include_timestamps else "",
+        mermaid_hint=MERMAID_HINT if diagrams else "",
+        timestamp_hint=TIMESTAMP_HINT if timestamps else "",
         enrichment_hint=ENRICHMENT_LEVELS[level],
+        length_hint=LENGTH_HINT.format(words=budget.notes_word_target) if budget else "",
     )
     # A little more latitude when the model is expected to contribute material of
     # its own; near-zero when it must stay inside the transcript.

@@ -30,6 +30,62 @@ class ChatMessage:
         return {"role": self.role, "content": self.content}
 
 
+#: Characters per token, averaged over English prose. Only used when a provider
+#: does not report real counts, and always flagged as an estimate when shown.
+CHARS_PER_TOKEN = 4
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    #: True when the provider counted these, False when we estimated them.
+    measured: bool = False
+
+    @property
+    def total(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total,
+            "measured": self.measured,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Completion:
+    text: str
+    usage: Usage = field(default_factory=Usage)
+
+
+def estimate_usage(messages: list[ChatMessage], reply: str) -> Usage:
+    """A character-count fallback for providers that report nothing."""
+    prompt = sum(len(message.content) for message in messages)
+    return Usage(
+        prompt_tokens=-(-prompt // CHARS_PER_TOKEN),
+        completion_tokens=-(-len(reply) // CHARS_PER_TOKEN),
+        measured=False,
+    )
+
+
+def usage_from_payload(payload: dict[str, Any] | None) -> Usage | None:
+    """Read an OpenAI-shaped ``usage`` block, if the provider sent one."""
+    if not isinstance(payload, dict):
+        return None
+    prompt = payload.get("prompt_tokens", payload.get("input_tokens"))
+    completion = payload.get("completion_tokens", payload.get("output_tokens"))
+    if prompt is None and completion is None:
+        return None
+    return Usage(
+        prompt_tokens=int(prompt or 0),
+        completion_tokens=int(completion or 0),
+        measured=True,
+    )
+
+
 @dataclass(slots=True)
 class ProviderStatus:
     key: str
@@ -65,7 +121,8 @@ class LLMProvider(Protocol):
         temperature: float = 0.2,
         max_tokens: int | None = None,
         expect_json: bool = False,
-    ) -> str: ...
+        model: str | None = None,
+    ) -> Completion: ...
 
 
 # --- JSON handling -----------------------------------------------------------

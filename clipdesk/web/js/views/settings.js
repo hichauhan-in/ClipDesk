@@ -1,7 +1,7 @@
 // Settings: what is installed, which model answers, and how ClipDesk behaves.
 
 import { api } from "../api.js";
-import { h, loadingView, mount, numberField, toast } from "../dom.js";
+import { debounce, h, loadingView, mount, numberField, toast } from "../dom.js";
 import { createJobPanel } from "../jobpanel.js";
 
 // The two Copilot routes are first-class choices; everything else is one
@@ -419,7 +419,84 @@ function modelCard(setup, settings, ctx) {
       { style: { marginBottom: "12px" } },
       "The transcript is the only thing sent to the model — never the video or the audio."
     ),
+    budgetPanel(settings),
     h("div.choices", cards),
+    body
+  );
+}
+
+/**
+ * How much to spend. In auto the slider decides both how much transcript each
+ * request carries and which model answers it; turning it off hands both back to
+ * the provider settings below.
+ */
+function budgetPanel(settings) {
+  const levels = settings.llm_budget_levels || [];
+  if (!levels.length) return h("div");
+
+  let level = settings.llm_budget_level ?? 2;
+  const auto = h("input", { type: "checkbox", checked: settings.llm_auto !== false });
+
+  const name = h("strong", levels[level]?.label || "");
+  const position = h("span.tag", `Level ${level + 1} of ${levels.length}`);
+  const note = h("div.muted.small", levels[level]?.note || "");
+  const slider = h("input", {
+    class: "enrichment-slider",
+    type: "range",
+    min: "0",
+    max: String(levels.length - 1),
+    step: "1",
+    value: String(level),
+    "aria-label": "Token budget",
+  });
+
+  const body = h("div.stack.budget-body", h("div.row-between", position, name), slider, note);
+
+  function paint() {
+    name.textContent = levels[level]?.label || "";
+    position.textContent = `Level ${level + 1} of ${levels.length}`;
+    note.textContent = levels[level]?.note || "";
+    slider.value = String(level);
+    slider.style.setProperty("--enrichment-progress", `${(level / (levels.length - 1)) * 100}%`);
+    body.style.display = auto.checked ? "" : "none";
+  }
+
+  // The panel repaints itself, so saving must not re-render the page — doing so
+  // would tear the slider out from under the pointer mid-drag.
+  const save = debounce(async (body) => {
+    try {
+      await api.putSettings(body);
+    } catch (error) {
+      toast(error.message, "err");
+    }
+  }, 350);
+
+  slider.oninput = () => {
+    level = Number(slider.value);
+    paint();
+    save({ llm_budget_level: level });
+  };
+  auto.onchange = () => {
+    paint();
+    save({ llm_auto: auto.checked });
+  };
+  paint();
+
+  return h(
+    "div.subcard.budget-panel",
+    h(
+      "label.check",
+      auto,
+      h(
+        "span",
+        h("strong", "Choose the model and request size for me"),
+        h(
+          "div.faint.small",
+          "Sends the mechanical passes to a smaller model and sizes each request to " +
+            "the recording. Turn this off to pick the model and reasoning yourself."
+        )
+      )
+    ),
     body
   );
 }

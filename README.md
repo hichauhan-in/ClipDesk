@@ -28,6 +28,7 @@ system-wide. Run one script and a browser tab opens.
 - [Bringing a recording in](#bringing-a-recording-in)
 - [What you can produce](#what-you-can-produce)
 - [How it works](#how-it-works)
+- [What it costs](#what-it-costs)
 - [What gets sent where](#what-gets-sent-where)
 - [Settings explained](#settings-explained)
 - [Project layout](#project-layout)
@@ -775,8 +776,67 @@ scoring alone, and says so in the report.
 
 ---
 
-## What gets sent where
+## What it costs
 
+Only four things call a model, and they cost very different amounts. Measured on
+a real 34-minute recording (495 segments, 28,000 transcript characters, 9
+chapters):
+
+| Pass | Calls | Why it costs what it does |
+| --- | --- | --- |
+| **Analysis** | one per window, plus one overview | The transcript is split into windows. The system prompt and the instruction template are re-sent with *every* window, and consecutive windows overlap on purpose, so the window size drives the bill more than the transcript length does. |
+| **Notes** | one per chapter | Input is the chapter's transcript; output is the notes themselves, and **output is the larger half**. Enrichment above level 0 multiplies it. |
+| **Article** | one | The transcript up to a cap, in one call. |
+| **Clip search** | one | A condensed transcript, in one call. |
+
+The counter-intuitive part: **smaller windows cost more.** Halving the window
+size doubles the number of windows, and each one pays the fixed prompt again
+plus another copy of the overlap.
+
+### Spending less
+
+**Settings → Language model** has a slider, on by default. It sizes each request
+and picks which model answers it — mechanical passes like window analysis are
+classification, which a small model does well, while the article is writing and
+is worth a larger one. The same recording, end to end:
+
+| Level | Windows | Total tokens | vs. Thorough |
+| --- | --- | --- | --- |
+| Fewest tokens | 2 | 27,350 | **−46%** |
+| Lean | 3 | 34,025 | −33% |
+| Balanced *(default)* | 4 | 44,444 | −12% |
+| Thorough | 5 | 50,445 | — |
+| Best quality | 7 | 60,029 | +19% |
+
+Levels differ in window size and overlap, how much transcript each notes section
+and the article carry, how long the answers may be, whether diagrams and
+timestamps are requested, how far enrichment may go, and which model tier each
+pass uses. Long recordings get proportionally larger windows at the same level,
+because otherwise they would pay the per-window overhead dozens more times.
+
+Turning the slider off hands model, reasoning effort and context window back to
+you, exactly as before.
+
+### Knowing what was spent
+
+The **Library** has a *Tokens* column beside Length and Size, totalled per
+recording across everything done to it. Hover for the split by pass, in and out,
+and which models answered.
+
+Where the provider counts for us the numbers are exact — the VS Code bridge
+counts with the model's own tokenizer, and hosted APIs report usage. Where it
+does not, the figure is estimated from character counts and marked with `~`,
+because a guess presented as a fact is worse than no number.
+
+To see how your own models would be graded:
+
+```powershell
+.\.venv\Scripts\python.exe tools\show_models.py
+```
+
+---
+
+## What gets sent where
 | Data | Leaves the machine? |
 | --- | --- |
 | The video file | **No.** Downloaded to this machine and never sent anywhere |
@@ -934,7 +994,7 @@ The UI is a client of this; anything it can do, a script can do.
 | `GET` | `/api/health` | ffmpeg, extractor, model and provider status |
 | `GET` | `/api/setup` | What is installed, what is missing |
 | `POST` | `/api/setup/provision` | Install a component → `{job_id}` |
-| `GET`/`PUT` | `/api/settings` | Read / write `config/local.yaml` |
+| `GET`/`PUT` | `/api/settings` | Read / write `config/local.yaml`; `llm_auto` and `llm_budget_level` control the token budget |
 | `POST` | `/api/links/inspect` | What ClipDesk makes of a link (synchronous) |
 | `POST` | `/api/links/browse` | List the videos in a shared folder |
 | `POST` | `/api/projects/from-link` | Import from a link → `{project_id, job_id}` |
@@ -1051,6 +1111,34 @@ click the indicator to bring it back. The usual fix is reloading VS Code:
 
 **"The bridge rejected the token"** — the handshake file is stale. Restart VS
 Code so a fresh one is written.
+
+**The bridge keeps dropping out, and reloading does not help** — two faults, both
+fixed in bridge **0.1.2**.
+
+*The handshake was being deleted by the wrong window.* Every VS Code window runs
+its own copy of the extension, and a window shutting down removed the handshake
+file belonging to the window that was still serving — leaving the bridge
+listening but unreachable, with nothing to put the file back.
+
+*The port could stay blocked forever.* VS Code keeps its node service alive
+across a window reload, so the old server could hold port 8761 after the window
+that started it had gone. Every later activation then failed to bind, and
+reloading again never helped because the socket was never released.
+
+The bridge now only removes a handshake it wrote, puts the file back if anything
+else removes it, and — when the port is held by something that is not a working
+bridge — **binds a free port instead and records it in the handshake**, which is
+where ClipDesk reads the address from anyway. A second window still stands down
+quietly and takes over if the first one closes.
+
+Check your installed version:
+
+```powershell
+Get-ChildItem "$HOME\.vscode\extensions" -Directory -Filter "clipdesk*"
+```
+
+If it is older than 0.1.2, run `.\scripts\install-bridge.ps1` and reload VS Code.
+To verify the behaviour itself: `node tools\check_bridge.js`.
 
 **A link import fails with a sign-in error** — use **Sign in to Microsoft** on
 the import panel. If browser automation is blocked on your machine, fall back to

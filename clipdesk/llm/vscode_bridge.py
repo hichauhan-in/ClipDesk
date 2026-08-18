@@ -21,9 +21,12 @@ import httpx
 from clipdesk.config import VSCodeLLMConfig
 from clipdesk.llm.base import (
     ChatMessage,
+    Completion,
     LLMError,
     LLMUnavailableError,
     ProviderStatus,
+    estimate_usage,
+    usage_from_payload,
 )
 from clipdesk.paths import user_state_dir
 
@@ -167,14 +170,16 @@ class VSCodeBridgeProvider:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         expect_json: bool = False,
-    ) -> str:
+        model: str | None = None,
+    ) -> Completion:
         base_url, token = self._endpoint()
         body: dict[str, Any] = {
             "messages": [message.to_dict() for message in messages],
             "temperature": temperature,
         }
-        if self.config.model:
-            body["model"] = self.config.model
+        chosen = model or self.config.model
+        if chosen:
+            body["model"] = chosen
         if self.config.reasoning_effort:
             body["reasoning_effort"] = self.config.reasoning_effort
         if self.config.context_window_tokens:
@@ -208,4 +213,6 @@ class VSCodeBridgeProvider:
         content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
         if not content:
             raise LLMError("The bridge returned an empty response.")
-        return str(content)
+        text = str(content)
+        # The extension counts with the model's own tokenizer, so prefer that.
+        return Completion(text, usage_from_payload(payload.get("usage")) or estimate_usage(messages, text))

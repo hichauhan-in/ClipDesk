@@ -134,7 +134,15 @@ Include, when the content supports it:
 
 {timestamp_hint}
 {enrichment_hint}
+{length_hint}
 Output Markdown only.
+"""
+
+# Not every provider accepts a cap on output length — the VS Code Language Model
+# API has no such setting — so the only lever that works everywhere is asking.
+LENGTH_HINT = """\
+Keep this section to about {words} words. Cover the substance and stop; do not \
+pad it out to look thorough.\
 """
 
 MERMAID_HINT = """\

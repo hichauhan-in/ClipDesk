@@ -14,6 +14,7 @@
 //   * the request body is size-capped.
 
 const http = require("node:http");
+const net = require("node:net");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -23,11 +24,16 @@ const vscode = require("vscode");
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const HANDSHAKE_DIR = path.join(os.homedir(), ".clipdesk");
 const HANDSHAKE_FILE = path.join(HANDSHAKE_DIR, "bridge.json");
+//: How often to check the handshake is still there, and to retry the port.
+const WATCHDOG_MS = 20000;
 
 let server = null;
 let token = "";
 let statusBar = null;
 let output = null;
+let watchdog = null;
+/** True when another window already serves the bridge and this one stood down. */
+let standby = false;
 /** Set once a request has actually reached the model, i.e. consent was given. */
 let consented = false;
 
@@ -190,13 +196,13 @@ async function handleChat(request, response) {
   }
 
   // Fail with a useful message instead of letting the model truncate silently.
+  let promptTokens = 0;
   try {
-    let tokens = 0;
     for (const message of messages) {
       const text = Array.isArray(message.content)
         ? message.content.map((part) => part.value ?? "").join("")
         : String(message.content ?? "");
-      tokens += await model.countTokens(text);
+      promptTokens += await model.countTokens(text);
     }
     const configuredLimit = Number.isSafeInteger(payload.context_window_tokens)
       ? payload.context_window_tokens
@@ -204,10 +210,10 @@ async function handleChat(request, response) {
     const inputLimit = configuredLimit && model.maxInputTokens
       ? Math.min(configuredLimit, model.maxInputTokens)
       : configuredLimit || model.maxInputTokens;
-    if (inputLimit && tokens > inputLimit) {
+    if (inputLimit && promptTokens > inputLimit) {
       send(response, 413, {
         error:
-          `The prompt is ${tokens} tokens but ${model.name} accepts ` +
+          `The prompt is ${promptTokens} tokens but ${model.name} accepts ` +
           `${inputLimit} with the current context setting. Lower the context window ` +
           `size or analysis.window_chars in ClipDesk's settings.`,
       });
@@ -231,10 +237,24 @@ async function handleChat(request, response) {
     consented = true;
     updateStatus();
 
+    // Counted with the model's own tokenizer, so ClipDesk reports what was
+    // actually spent rather than a guess from character counts.
+    let completionTokens = 0;
+    try {
+      completionTokens = await model.countTokens(text);
+    } catch {
+      /* best effort */
+    }
+
     send(response, 200, {
       id: `clipdesk-${Date.now().toString(36)}`,
       model: model.id,
       choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
+      },
     });
   } catch (error) {
     const isLmError = error instanceof vscode.LanguageModelError;
@@ -294,18 +314,79 @@ function writeHandshake(port) {
 }
 
 function removeHandshake() {
+  // Every VS Code window runs its own copy of this extension. Deleting a
+  // handshake another window wrote would take the bridge down underneath it,
+  // and nothing would put it back — so only ever remove our own.
+  const existing = readHandshake();
+  if (!existing) return;
+  if (!token || existing.token !== token) {
+    log("Handshake belongs to another window; left in place.");
+    return;
+  }
   try {
     fs.unlinkSync(HANDSHAKE_FILE);
+    log("Handshake removed.");
   } catch {
     /* already gone */
   }
 }
 
-function startServer() {
-  return new Promise((resolve, reject) => {
-    token = crypto.randomBytes(32).toString("hex");
+function readHandshake() {
+  try {
+    return JSON.parse(fs.readFileSync(HANDSHAKE_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
 
-    server = http.createServer(async (request, response) => {
+/** Is something accepting connections at this address right now? */
+function isListening(baseUrl) {
+  return new Promise((resolve) => {
+    let port;
+    try {
+      port = Number(new URL(baseUrl).port);
+    } catch {
+      resolve(false);
+      return;
+    }
+    const probe = net.connect({ port, host: "127.0.0.1" });
+    const done = (answer) => {
+      probe.destroy();
+      resolve(answer);
+    };
+    probe.setTimeout(400);
+    probe.on("connect", () => done(true));
+    probe.on("timeout", () => done(false));
+    probe.on("error", () => done(false));
+  });
+}
+
+function startServer() {
+  const preferred = Number(config().get("port") ?? 8761);
+  return listen(preferred).catch(async (error) => {
+    if (error.code !== "EADDRINUSE") throw error;
+
+    // Someone holds the port. If it is another window's bridge, this window has
+    // nothing to add and stands down. If not — a stale socket VS Code kept
+    // alive across a reload, or an unrelated program — the bridge must not be
+    // held hostage by a port number. The handshake carries the address, so any
+    // free port works just as well.
+    const existing = readHandshake();
+    if (existing?.base_url && (await isListening(existing.base_url))) {
+      standby = true;
+      log(`Port ${preferred} is serving another window's bridge; standing down.`);
+      return null;
+    }
+    log(`Port ${preferred} is held by something that is not the bridge; using a free port.`);
+    return listen(0);
+  });
+}
+
+function listen(port) {
+  return new Promise((resolve, reject) => {
+    const attempt = crypto.randomBytes(32).toString("hex");
+
+    const candidate = http.createServer(async (request, response) => {
       if (fromBrowser(request)) {
         send(response, 403, { error: "Browser-originated requests are not accepted." });
         return;
@@ -325,14 +406,12 @@ function startServer() {
       }
     });
 
-    server.on("error", (error) => {
-      log(`Server error: ${error.message}`);
-      reject(error);
-    });
-
-    const port = Number(config().get("port") ?? 8761);
-    server.listen(port, "127.0.0.1", () => {
-      const actual = server.address().port;
+    candidate.on("error", reject);
+    candidate.listen(port, "127.0.0.1", () => {
+      server = candidate;
+      token = attempt;
+      standby = false;
+      const actual = candidate.address().port;
       writeHandshake(actual);
       log(`Listening on http://127.0.0.1:${actual}`);
       resolve(actual);
@@ -342,23 +421,63 @@ function startServer() {
 
 function stopServer() {
   removeHandshake();
+  token = "";
   if (server) {
+    // close() alone waits for keep-alive clients, which can hold the port past
+    // a window reload and lock the next activation out of it.
+    server.closeAllConnections?.();
     server.close();
     server = null;
   }
 }
 
+/**
+ * Keeps the bridge reachable without the user having to notice it is not.
+ *
+ * Two things it repairs: a handshake removed by another window shutting down,
+ * and this window standing down for a port that has since been given up.
+ */
+function startWatchdog(start) {
+  if (watchdog) return;
+  watchdog = setInterval(() => {
+    try {
+      if (server) {
+        if (!fs.existsSync(HANDSHAKE_FILE)) {
+          log("Handshake had gone; writing it again.");
+          writeHandshake(server.address().port);
+          updateStatus();
+        }
+        return;
+      }
+      if (standby) start();
+    } catch (error) {
+      log(`Watchdog: ${error.message}`);
+    }
+  }, WATCHDOG_MS);
+}
+
+function stopWatchdog() {
+  if (watchdog) clearInterval(watchdog);
+  watchdog = null;
+}
+
 function updateStatus() {
   if (!statusBar) return;
   const port = server?.address()?.port;
-  if (!port) {
-    statusBar.text = "$(circle-slash) ClipDesk";
-    statusBar.tooltip = "ClipDesk Bridge is stopped.";
-    statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-  } else {
+  if (port) {
     statusBar.text = "$(broadcast) ClipDesk";
     statusBar.tooltip = `ClipDesk Bridge is listening on 127.0.0.1:${port}`;
     statusBar.backgroundColor = undefined;
+  } else if (standby) {
+    statusBar.text = "$(broadcast) ClipDesk";
+    statusBar.tooltip =
+      "Another VS Code window is serving the ClipDesk Bridge. This window will " +
+      "take over if that one closes.";
+    statusBar.backgroundColor = undefined;
+  } else {
+    statusBar.text = "$(circle-slash) ClipDesk";
+    statusBar.tooltip = "ClipDesk Bridge is stopped.";
+    statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
   }
   statusBar.show();
 }
@@ -368,7 +487,7 @@ async function activate(context) {
   output = vscode.window.createOutputChannel("ClipDesk Bridge");
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = "clipdeskBridge.status";
-  context.subscriptions.push(output, statusBar, { dispose: stopServer });
+  context.subscriptions.push(output, statusBar, { dispose: shutDown });
 
   const start = async () => {
     try {
@@ -437,10 +556,16 @@ async function activate(context) {
 
   if (config().get("autoStart") !== false) await start();
   else updateStatus();
+  startWatchdog(start);
+}
+
+function shutDown() {
+  stopWatchdog();
+  stopServer();
 }
 
 function deactivate() {
-  stopServer();
+  shutDown();
 }
 
 module.exports = { activate, deactivate };

@@ -28,9 +28,11 @@ from pathlib import Path
 from clipdesk.config import CopilotCliConfig
 from clipdesk.llm.base import (
     ChatMessage,
+    Completion,
     LLMError,
     LLMUnavailableError,
     ProviderStatus,
+    estimate_usage,
 )
 
 SETUP_HINT = (
@@ -184,7 +186,8 @@ class CopilotCliProvider:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         expect_json: bool = False,
-    ) -> str:
+        model: str | None = None,
+    ) -> Completion:
         executable = self._resolve()
         if executable is None:
             raise LLMUnavailableError(
@@ -192,17 +195,19 @@ class CopilotCliProvider:
             )
 
         prompt = _flatten(messages)
+        # The CLI prints an answer, never a usage block, so counts are estimated.
+        reply = lambda text: Completion(text, estimate_usage(messages, text))  # noqa: E731
 
         answer, failure, returncode, stderr = self._invoke(executable, prompt)
         if answer and not _looks_like_deflection(answer):
-            return answer
+            return reply(answer)
 
         if answer:
             answer, failure, returncode, stderr = self._invoke(
                 executable, f"{_CORRECTION}\n\n{prompt}"
             )
             if answer and not _looks_like_deflection(answer):
-                return answer
+                return reply(answer)
             if answer:
                 raise LLMError(
                     "The Copilot CLI did not do the work — it replied "

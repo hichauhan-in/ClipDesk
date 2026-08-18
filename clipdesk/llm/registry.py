@@ -9,12 +9,14 @@ from clipdesk.llm.anthropic import AnthropicProvider
 from clipdesk.llm.base import (
     JSON_INSTRUCTION,
     ChatMessage,
+    Completion,
     LLMError,
     LLMProvider,
     LLMUnavailableError,
     ProviderStatus,
     extract_json,
 )
+from clipdesk.llm.budget import Budget, TokenMeter, budget_for, pick_model
 from clipdesk.llm.copilot_cli import CopilotCliProvider
 from clipdesk.llm.openai_compat import OpenAICompatProvider
 from clipdesk.llm.vscode_bridge import VSCodeBridgeProvider
@@ -57,16 +59,48 @@ class LLMClient:
     readable.
     """
 
-    def __init__(self, provider: LLMProvider, *, json_retries: int = 2) -> None:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        *,
+        json_retries: int = 2,
+        budget: Budget | None = None,
+        meter: TokenMeter | None = None,
+    ) -> None:
         self.provider = provider
         self.json_retries = max(0, json_retries)
+        self.budget = budget
+        self.meter = meter or TokenMeter()
+        #: Which activity the next calls belong to, for the per-project total.
+        self.task = "analyse"
+        #: Model list, fetched once. Asking the provider per call is a round trip.
+        self._models: list[str] | None = None
 
     @classmethod
-    def from_settings(cls, settings: Settings, provider_key: str | None = None) -> LLMClient:
+    def from_settings(
+        cls,
+        settings: Settings,
+        provider_key: str | None = None,
+        *,
+        duration_s: float = 0.0,
+        meter: TokenMeter | None = None,
+    ) -> LLMClient:
+        budget = (
+            budget_for(settings.llm.budget_level, duration_s=duration_s)
+            if settings.llm.auto
+            else None
+        )
         return cls(
             build_provider(settings.llm, provider_key),
             json_retries=settings.analysis.json_retries,
+            budget=budget,
+            meter=meter,
         )
+
+    def for_task(self, task: str) -> LLMClient:
+        """The same client, spending against a different line of the bill."""
+        self.task = task
+        return self
 
     @property
     def key(self) -> str:
@@ -79,6 +113,46 @@ class LLMClient:
     def status(self) -> ProviderStatus:
         return self.provider.status()
 
+    def _send(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float,
+        max_tokens: int | None,
+        expect_json: bool = False,
+    ) -> str:
+        """Every call goes through here, so every call gets counted."""
+        model = self._auto_model()
+        result = self.provider.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            expect_json=expect_json,
+            model=model,
+        )
+        # A provider written before Completion existed still returns a string.
+        if isinstance(result, Completion):
+            self.meter.record(self.task, result.usage, model or self._active_model())
+            return result.text
+        return str(result)
+
+    def _auto_model(self) -> str | None:
+        """The model this task's budget asks for, from what the provider offers."""
+        if self.budget is None:
+            return None
+        if self._models is None:
+            try:
+                self._models = list(self.provider.status().models)
+            except Exception:  # noqa: BLE001
+                self._models = []
+        return pick_model(self._models, self.budget.tier_for(self.task)) or None
+
+    def _active_model(self) -> str:
+        try:
+            return self.provider.status().active_model
+        except Exception:  # noqa: BLE001
+            return ""
+
     def complete(
         self,
         system: str,
@@ -89,9 +163,7 @@ class LLMClient:
     ) -> str:
         messages = [ChatMessage("system", system), ChatMessage("user", user)]
         return self._with_retry(
-            lambda: self.provider.complete(
-                messages, temperature=temperature, max_tokens=max_tokens
-            )
+            lambda: self._send(messages, temperature=temperature, max_tokens=max_tokens)
         )
 
     def complete_json(
@@ -114,7 +186,7 @@ class LLMClient:
             attempt_messages = messages
             try:
                 raw = self._with_retry(
-                    lambda payload=attempt_messages: self.provider.complete(
+                    lambda payload=attempt_messages: self._send(
                         payload,
                         temperature=temperature,
                         max_tokens=max_tokens,

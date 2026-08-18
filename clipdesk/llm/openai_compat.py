@@ -18,9 +18,12 @@ import httpx
 from clipdesk.config import OpenAICompatConfig
 from clipdesk.llm.base import (
     ChatMessage,
+    Completion,
     LLMError,
     LLMUnavailableError,
     ProviderStatus,
+    estimate_usage,
+    usage_from_payload,
 )
 
 SETUP_HINT = (
@@ -99,7 +102,8 @@ class OpenAICompatProvider:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         expect_json: bool = False,
-    ) -> str:
+        model: str | None = None,
+    ) -> Completion:
         if not self.config.base_url:
             raise LLMUnavailableError(f"No endpoint configured. {SETUP_HINT}")
         if not self._api_key():
@@ -108,7 +112,7 @@ class OpenAICompatProvider:
             )
 
         body: dict[str, Any] = {
-            "model": self.config.model,
+            "model": model or self.config.model,
             "messages": [message.to_dict() for message in messages],
             "temperature": temperature,
         }
@@ -144,4 +148,5 @@ class OpenAICompatProvider:
         content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
         if not content:
             raise LLMError("The endpoint returned an empty response.")
-        return str(content)
+        text = str(content)
+        return Completion(text, usage_from_payload(payload.get("usage")) or estimate_usage(messages, text))

@@ -160,6 +160,7 @@ from clipdesk.ingest.sharepoint import (
     resolve as resolve_share,
 )
 from clipdesk.llm import PRESETS, LLMClient, all_statuses, extension_state
+from clipdesk.llm.budget import LEVELS as BUDGET_LEVELS
 from clipdesk.llm.presets import get as get_preset
 from clipdesk.media.ffmpeg import find_tools
 from clipdesk.media.soundtrack import (
@@ -393,8 +394,8 @@ class UserState:
         """
         return 0.0 if self.settings.llm.provider == "vscode" else self.PROBE_TTL_S
 
-    def llm(self, provider_key: str | None = None) -> LLMClient:
-        return LLMClient.from_settings(self.settings, provider_key)
+    def llm(self, provider_key: str | None = None, *, duration_s: float = 0.0) -> LLMClient:
+        return LLMClient.from_settings(self.settings, provider_key, duration_s=duration_s)
 
     def ffmpeg(self):
         tools = find_tools(self.settings.paths.vendor_dir)
@@ -649,6 +650,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def pending_outputs(app_state: UserState, project: Project) -> list[str]:
         return app_state.sequence.outputs(project.id)
 
+    def track_tokens(project: Project, llm: LLMClient | None) -> None:
+        """Fold one action's usage into the project's running total."""
+        if llm is not None:
+            project.record_tokens(llm.meter.to_dict())
+
     def artifact_payload(project: Project) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for entry in project.meta.artifacts:
@@ -769,6 +775,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "version": __version__,
             "llm_provider": settings.llm.provider,
+            "llm_auto": settings.llm.auto,
+            "llm_budget_level": settings.llm.budget_level,
+            "llm_budget_levels": [
+                {
+                    "level": item.level,
+                    "label": item.label,
+                    "note": item.note,
+                    "diagrams": item.include_diagrams,
+                    "max_enrichment": item.max_enrichment,
+                }
+                for item in BUDGET_LEVELS
+            ],
             "llm_model": settings.llm.vscode.model or "",
             "vscode_reasoning_effort": settings.llm.vscode.reasoning_effort or "",
             "vscode_context_window_tokens": settings.llm.vscode.context_window_tokens or 0,
@@ -859,6 +877,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if update.llm_provider:
             put("llm", "provider", update.llm_provider)
+        if update.llm_auto is not None:
+            put("llm", "auto", update.llm_auto)
+        if update.llm_budget_level is not None:
+            put("llm", "budget_level", update.llm_budget_level)
         if update.llm_model is not None:
             put("llm", "vscode", "model", update.llm_model or None)
         if update.vscode_reasoning_effort is not None:
@@ -1411,7 +1433,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project = require_project(project_id, app_state)
         app_state.ffmpeg()
         settings = app_state.settings
-        llm = None if request.skip_llm else app_state.llm(request.llm_provider)
+        llm = (
+            None
+            if request.skip_llm
+            else app_state.llm(request.llm_provider, duration_s=project.meta.duration_s)
+        )
 
         def work(bus: EventBus) -> dict[str, Any]:
             try:
@@ -1421,6 +1447,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 project.meta.error = str(exc) or exc.__class__.__name__
                 project.save()
                 raise
+            finally:
+                track_tokens(project, llm)
             return {
                 "project_id": project.id,
                 "title": report.title,
@@ -1449,10 +1477,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.notes.enrichment = request.enrichment
         if request.chapters_per_file:
             settings.notes.chapters_per_file = request.chapters_per_file
-        llm = app_state.llm()
+        llm = app_state.llm(duration_s=report.media.duration_s)
 
         def work(bus: EventBus) -> dict[str, Any]:
-            paths = generate_notes(project, report, settings, llm, bus)
+            llm.for_task("notes")
+            try:
+                paths = generate_notes(project, report, settings, llm, bus)
+            finally:
+                track_tokens(project, llm)
             return {"files": [path.name for path in paths]}
 
         return start_job(
@@ -1491,26 +1523,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=409,
                 detail="The Word template is missing from tools/template/file.docx.",
             )
-        llm = app_state.llm()
+        llm = app_state.llm(duration_s=report.media.duration_s)
         stem = safe_filename(request.output_name, fallback="article") if request.output_name else ""
         output_name = f"{Path(stem).stem or 'article'}.{request.format}"
 
         def work(bus: EventBus) -> dict[str, Any]:
-            path = generate_article(
-                project,
-                report,
-                settings,
-                llm,
-                bus,
-                article_format=request.format,
-                shape=request.shape,
-                title=request.title,
-                audience=request.audience,
-                extra_sections=list(request.extra_sections),
-                enrichment=request.enrichment,
-                include_diagram=request.include_diagram,
-                output_name=output_name,
-            )
+            try:
+                path = generate_article(
+                    project,
+                    report,
+                    settings,
+                    llm,
+                    bus,
+                    article_format=request.format,
+                    shape=request.shape,
+                    title=request.title,
+                    audience=request.audience,
+                    extra_sections=list(request.extra_sections),
+                    enrichment=request.enrichment,
+                    include_diagram=request.include_diagram,
+                    output_name=output_name,
+                )
+            finally:
+                track_tokens(project, llm)
             return {"file": path.name}
 
         return start_job(
@@ -1584,12 +1619,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         project = require_project(project_id, app_state)
         report = require_report(project)
-        llm = app_state.llm() if request.use_llm else None
+        llm = app_state.llm(duration_s=report.media.duration_s) if request.use_llm else None
         query = request.query.strip()
         highlights = request.mode == "highlight"
 
         def work(bus: EventBus) -> dict[str, Any]:
             bus.stage_start("find", "Reading the transcript")
+            if llm is not None:
+                llm.for_task("clips")
             try:
                 result = find_candidates(
                     report,
@@ -1603,6 +1640,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
+            finally:
+                track_tokens(project, llm)
             payload = result.to_dict()
             bus.stage_end("find", f"{len(payload.get('candidates') or [])} option(s) found")
             # The query and mode ride along so the tab can rebuild its heading

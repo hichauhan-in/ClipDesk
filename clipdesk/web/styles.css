@@ -915,6 +915,11 @@ button.choice .row { gap: 8px; flex-wrap: wrap; }
 .icon-btn:hover { background: #1c2230; color: var(--text); }
 .icon-btn:disabled { opacity: 0.3; cursor: default; background: none; }
 
+/* --- token budget ------------------------------------------------------- */
+.budget-panel { margin-bottom: 14px; }
+.budget-panel > label.check { align-items: flex-start; }
+.budget-body { gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+
 /* --- queue ------------------------------------------------------------- */
 .run-row { gap: 8px; align-items: center; flex-wrap: wrap; }
 .queue-panel {

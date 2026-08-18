@@ -54,6 +54,8 @@ class ProjectMeta:
     #: Where it came from, when it was imported from a link rather than uploaded.
     source_url: str = ""
     error: str = ""
+    #: Tokens spent on this recording, accumulated across every action.
+    tokens: dict[str, Any] = field(default_factory=dict)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -70,6 +72,7 @@ class ProjectMeta:
             "transcript_filename": self.transcript_filename,
             "source_url": self.source_url,
             "error": self.error,
+            "tokens": self.tokens,
             "artifacts": self.artifacts,
         }
 
@@ -88,6 +91,7 @@ class ProjectMeta:
             transcript_filename=str(data.get("transcript_filename", "")),
             source_url=str(data.get("source_url", "")),
             error=str(data.get("error", "")),
+            tokens=dict(data.get("tokens") or {}),
             artifacts=list(data.get("artifacts") or []),
         )
 
@@ -209,6 +213,30 @@ class Project:
         self.meta.artifacts.append(artifact.model_dump(mode="json"))
         self.save()
         return artifact
+
+    def record_tokens(self, usage: dict[str, Any]) -> None:
+        """Add one action's usage to this project's running total."""
+        if not usage or not usage.get("total_tokens"):
+            return
+        current = self.meta.tokens or {}
+        by_task = dict(current.get("by_task") or {})
+        for task, entry in (usage.get("by_task") or {}).items():
+            running = by_task.setdefault(task, {"calls": 0, "prompt": 0, "completion": 0})
+            for key in ("calls", "prompt", "completion"):
+                running[key] = running.get(key, 0) + entry.get(key, 0)
+        self.meta.tokens = {
+            "calls": current.get("calls", 0) + usage.get("calls", 0),
+            "prompt_tokens": current.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0),
+            "completion_tokens": (
+                current.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+            ),
+            "total_tokens": current.get("total_tokens", 0) + usage.get("total_tokens", 0),
+            # One estimated call makes the whole total an estimate.
+            "measured": bool(current.get("measured", True)) and bool(usage.get("measured", True)),
+            "by_task": by_task,
+            "models": sorted({*(current.get("models") or []), *(usage.get("models") or [])}),
+        }
+        self.save()
 
     def remove_artifact(self, artifact_id: str) -> bool:
         remaining = []

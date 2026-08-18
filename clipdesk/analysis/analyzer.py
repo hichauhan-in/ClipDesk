@@ -123,10 +123,16 @@ class TranscriptAnalyzer:
         decisions: list[Decision] = []
 
         if self.llm is not None and segments:
+            # Auto mode sizes the windows: fewer, larger ones repeat the system
+            # prompt and the overlap far less often.
+            budget = getattr(self.llm, "budget", None)
+            self.llm.for_task("analyse")
             windows = build_windows(
                 segments,
-                window_chars=config.window_chars,
-                overlap_chars=config.window_overlap_chars,
+                window_chars=budget.window_chars if budget else config.window_chars,
+                overlap_chars=(
+                    budget.window_overlap_chars if budget else config.window_overlap_chars
+                ),
             )
             results = self._run_windows(windows, title or media.filename)
             for result in results:

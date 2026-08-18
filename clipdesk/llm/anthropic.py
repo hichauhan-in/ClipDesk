@@ -16,9 +16,12 @@ import httpx
 from clipdesk.config import AnthropicConfig
 from clipdesk.llm.base import (
     ChatMessage,
+    Completion,
     LLMError,
     LLMUnavailableError,
     ProviderStatus,
+    estimate_usage,
+    usage_from_payload,
 )
 
 SETUP_HINT = (
@@ -95,7 +98,8 @@ class AnthropicProvider:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         expect_json: bool = False,
-    ) -> str:
+        model: str | None = None,
+    ) -> Completion:
         if not self._api_key():
             raise LLMUnavailableError(
                 f"Environment variable {self.config.api_key_env} is not set."
@@ -111,7 +115,7 @@ class AnthropicProvider:
             raise LLMError("No user message to send.")
 
         body: dict[str, Any] = {
-            "model": self.config.model,
+            "model": model or self.config.model,
             # Required by the API, unlike the OpenAI shape where it is optional.
             "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": temperature,
@@ -146,4 +150,4 @@ class AnthropicProvider:
         ).strip()
         if not text:
             raise LLMError("Anthropic returned an empty response.")
-        return text
+        return Completion(text, usage_from_payload(payload.get("usage")) or estimate_usage(messages, text))

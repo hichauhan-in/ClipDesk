@@ -35,7 +35,7 @@ def test_model_effort_and_context_are_forwarded_to_the_bridge(monkeypatch):
 
     answer = provider.complete([ChatMessage("user", "hello")])
 
-    assert answer == "done"
+    assert answer.text == "done"
     assert captured["url"].endswith("/v1/chat/completions")
     assert captured["body"]["model"] == "gpt-test"
     assert captured["body"]["reasoning_effort"] == "high"
