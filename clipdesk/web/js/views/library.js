@@ -37,14 +37,19 @@ function tokenCell(tokens) {
     `In ${tokens.prompt_tokens.toLocaleString()} · out ${tokens.completion_tokens.toLocaleString()}`
   );
   if (tokens.models?.length) lines.push(`Models: ${tokens.models.join(", ")}`);
-  // Say so when the provider did not count for us, rather than implying it did.
-  if (!tokens.measured) lines.push("Estimated — this provider does not report usage.");
+  // The tilde is always shown, so the hover has to say which kind of
+  // approximation this is rather than leaving the reader to assume the worse.
+  lines.push(
+    tokens.measured
+      ? "Counted by the model's own tokenizer, so the token figure is exact."
+      : "Estimated from character counts — this provider does not report usage."
+  );
 
   return h(
     "td.nowrap",
     { title: lines.join("\n") },
     h("span", compactCount(total)),
-    tokens.measured ? null : h("span.faint", { style: { marginLeft: "3px" } }, "~")
+    h("span.faint", { style: { marginLeft: "3px" } }, "~")
   );
 }
 
@@ -55,7 +60,7 @@ function creditCell(tokens) {
   const unpriced = tokens.unpriced || [];
   // Everything priced but rounding to zero is real: a small model answering a
   // short prompt genuinely costs a fraction of a cent.
-  if (!credits && !unpriced.length) return h("td.nowrap.faint.small", "<0.01");
+  if (!credits && !unpriced.length) return h("td.nowrap.faint.small", "<0.01~");
 
   const lines = Object.entries(tokens.by_model || {})
     .map(([model, entry]) => [model, entry, (entry.prompt + entry.completion) || 0])
@@ -65,15 +70,17 @@ function creditCell(tokens) {
   if (unpriced.length) lines.push(`No published price for: ${unpriced.join(", ")}`);
   // The two ways this can differ from a GitHub bill, said rather than hidden.
   lines.push("Cached input is charged less and is not counted here, so this is a ceiling.");
-  if (!tokens.measured) lines.push("Based on estimated tokens, so the cost is estimated too.");
+  lines.push(
+    tokens.measured
+      ? "Priced from exact token counts at GitHub's published rates."
+      : "Based on estimated tokens, so the cost is estimated too."
+  );
 
   return h(
     "td.nowrap",
     { title: lines.join("\n") },
     h("span", credits.toFixed(2)),
-    unpriced.length || !tokens.measured
-      ? h("span.faint", { style: { marginLeft: "3px" } }, "~")
-      : null
+    h("span.faint", { style: { marginLeft: "3px" } }, "~")
   );
 }
 
