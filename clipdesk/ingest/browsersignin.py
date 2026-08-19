@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 #: Hosts that mean "still signing in", not "arrived".
 _SIGN_IN_HOSTS = (
@@ -53,6 +53,11 @@ _CHROME_CANDIDATES = (
 
 _NO_WINDOW = 0  # the browser is meant to be seen
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+#: How long a tab must sit on a non-sign-in page before its address is accepted
+#: whatever its shape. OneDrive changes what a share resolves to, and an
+#: unrecognised address should cost a few seconds, not the whole sign-in.
+_SETTLE_GRACE_S = 10.0
 
 
 class SignInError(RuntimeError):
@@ -180,16 +185,63 @@ def _debug_json(port: int, path: str, timeout: float = 3.0):
         return json.load(response)
 
 
-def _wait_for_debugger(port: int, deadline: float) -> dict:
+def _active_debug_port(profile: Path) -> int:
+    """The port a browser already running on this profile is listening on.
+
+    Chromium writes this file itself. It is the only reliable way to find a
+    window ClipDesk opened earlier, and it matters because launching a second
+    time on the same profile does not start a second browser: the new process
+    hands the URL to the running one and exits, so the port asked for on the
+    command line never opens.
+    """
+    try:
+        first = (profile / "DevToolsActivePort").read_text(encoding="utf-8").splitlines()[0]
+        return int(first.strip())
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _live_debugger(port: int) -> bool:
+    if port <= 0:
+        return False
+    try:
+        _debug_json(port, "/json/version", timeout=1.5)
+        return True
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return False
+
+
+def _open_tab(port: int, url: str) -> None:
+    """Point an already-running browser at ``url``."""
+    target = f"http://127.0.0.1:{port}/json/new?{quote(url, safe='')}"
+    request = urllib.request.Request(target, method="PUT")
+    try:
+        urllib.request.urlopen(request, timeout=5.0).close()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        # Older builds serve the same endpoint over GET.
+        try:
+            urllib.request.urlopen(target, timeout=5.0).close()
+        except (urllib.error.URLError, OSError):
+            pass
+
+
+def _wait_for_debugger(port: int, deadline: float, profile: Path) -> tuple[int, dict]:
+    """Wait for the DevTools endpoint, following the browser if it moved ports."""
     while time.time() < deadline:
         try:
-            return _debug_json(port, "/json/version")
+            return port, _debug_json(port, "/json/version")
         except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            # The launch may have been absorbed by a browser already running on
+            # this profile, which is listening somewhere else.
+            existing = _active_debug_port(profile)
+            if existing and existing != port and _live_debugger(existing):
+                return existing, _debug_json(existing, "/json/version")
             time.sleep(0.4)
     raise SignInError(
-        "The browser started but ClipDesk could not talk to it. Corporate policy "
-        "may block browser automation on this machine; use \"Paste a signed-in "
-        "session\" instead."
+        "The browser started but ClipDesk could not talk to it. If a ClipDesk "
+        "sign-in window is already open, close it and try again. Otherwise "
+        "corporate policy may block browser automation on this machine; use "
+        "\"Paste a signed-in session\" instead."
     )
 
 
@@ -275,6 +327,19 @@ def _page_targets(port: int) -> list[dict]:
     return [target for target in targets if target.get("type") == "page"]
 
 
+def _stop(process: subprocess.Popen | None) -> None:
+    """Close a browser this run started, tolerating one that is already gone."""
+    if process is None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    except OSError:
+        pass
+
+
 #: Cookies that actually authorise a SharePoint or OneDrive request. Their
 #: presence is the only reliable "the user is through" signal -- the browser sits
 #: on an OAuth URL for a while, and other tabs are not evidence of anything.
@@ -283,6 +348,23 @@ _AUTH_COOKIE_NAMES = {"fedauth", "rtfa", "edgeaccesscookie", "spoidcrl"}
 
 def _has_auth_cookie(cookies: list[dict]) -> bool:
     return any(str(cookie.get("name", "")).lower() in _AUTH_COOKIE_NAMES for cookie in cookies)
+
+
+def _session_hosts(cookies: list[dict]) -> set[str]:
+    """Hosts that actually hold a session, taken from the cookies themselves.
+
+    A folder share is listed against the tenant host, and the address bar may
+    never name it, so the cookie jar is the more reliable place to look.
+    """
+    hosts: set[str] = set()
+    for cookie in cookies:
+        if str(cookie.get("name", "")).lower() not in _AUTH_COOKIE_NAMES:
+            continue
+        domain = str(cookie.get("domain", "")).lstrip(".").lower()
+        if domain and not any(domain == known or domain.endswith("." + known)
+                              for known in _SIGN_IN_HOSTS):
+            hosts.add(domain)
+    return hosts
 
 
 async def _read_cookies(ws_url: str) -> list[dict]:
@@ -337,28 +419,46 @@ def sign_in(
 
     port = _free_port()
     profile = profile_dir(state_dir)
-    on_progress(None, f"Opening {label}…")
+    process: subprocess.Popen | None = None
 
-    process = subprocess.Popen(
-        [
-            executable,
-            f"--user-data-dir={profile}",
-            f"--remote-debugging-port={port}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--new-window",
-            url,
-        ],
-        creationflags=_NO_WINDOW,
-    )
+    def start() -> tuple[int, dict]:
+        """Reuse a window already on this profile, or open one, and connect.
+
+        Chromium forwards to an instance already running on the profile and then
+        exits, so launching blind leaves ClipDesk talking to a port nothing is
+        listening on.
+        """
+        nonlocal process
+        running = _active_debug_port(profile)
+        if _live_debugger(running):
+            on_progress(None, f"Using the {label} window ClipDesk already opened…")
+            _open_tab(running, url)
+            return _wait_for_debugger(running, time.time() + 30, profile)
+
+        on_progress(None, f"Opening {label}…")
+        chosen = _free_port()
+        process = subprocess.Popen(
+            [
+                executable,
+                f"--user-data-dir={profile}",
+                f"--remote-debugging-port={chosen}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--new-window",
+                url,
+            ],
+            creationflags=_NO_WINDOW,
+        )
+        return _wait_for_debugger(chosen, time.time() + 30, profile)
 
     deadline = time.time() + timeout_s
     try:
-        info = _wait_for_debugger(port, min(deadline, time.time() + 30))
-        try:
-            _bring_to_foreground(process.pid)
-        except Exception:  # noqa: BLE001 - window focus must never break authentication
-            pass
+        port, info = start()
+        if process is not None:
+            try:
+                _bring_to_foreground(process.pid)
+            except Exception:  # noqa: BLE001 - window focus must never break authentication
+                pass
         on_progress(
             None,
             "Sign in to Microsoft in the window that just opened. This is only "
@@ -369,6 +469,8 @@ def sign_in(
         # and treating any of those as "arrived" reports success while the user is
         # still looking at a sign-in prompt.
         tab_id = ""
+        settled_at = 0.0
+        current_url = ""
         while time.time() < deadline and not tab_id:
             for target in _page_targets(port):
                 if host in str(target.get("url", "")) or _is_sign_in(str(target.get("url", ""))):
@@ -377,21 +479,69 @@ def sign_in(
             if not tab_id:
                 time.sleep(0.5)
 
+        # Whether the browser is still there is answered by the DevTools endpoint,
+        # not by the process that was launched: Edge hands the URL to an instance
+        # already running on this profile and exits, leaving a live window behind
+        # a dead launcher. Losing the endpoint is usually a stale port left by an
+        # earlier attempt whose browser was still shutting down, so try once more
+        # from scratch before giving up on a window the user can plainly see.
+        missed = 0
+        relaunched = False
         while time.time() < deadline:
-            if process.poll() is not None:
-                raise SignInError("The sign-in window was closed before it finished.")
+            if _live_debugger(port):
+                missed = 0
+            else:
+                missed += 1
+                if missed >= 3:
+                    if relaunched:
+                        raise SignInError(
+                            "The sign-in window was closed before it finished."
+                        )
+                    relaunched = True
+                    missed = 0
+                    tab_id = ""
+                    on_progress(None, "Reconnecting to the sign-in window…")
+                    _stop(process)
+                    process = None
+                    port, info = start()
+                    continue
+                time.sleep(0.8)
+                continue
 
             targets = {str(target.get("id", "")): target for target in _page_targets(port)}
+            # A relaunch leaves no tab to follow, so pick one up again rather than
+            # watching an id that belonged to the browser that went away.
+            if not tab_id:
+                for target in targets.values():
+                    candidate = str(target.get("url", ""))
+                    if host in candidate or _is_sign_in(candidate):
+                        tab_id = str(target.get("id", ""))
+                        break
             current = targets.get(tab_id) or {}
             current_url = str(current.get("url", ""))
 
-            if _has_arrived(current_url):
+            # OneDrive keeps changing the address a share resolves to, and a shape
+            # nobody anticipated used to mean waiting for ever. Once the tab has
+            # been off the sign-in pages for a while, stop insisting on a known
+            # address and let the session cookie be the judge.
+            if current_url and not _is_sign_in(current_url):
+                settled_at = settled_at or time.time()
+            else:
+                settled_at = 0.0
+            settled = bool(settled_at) and time.time() - settled_at >= _SETTLE_GRACE_S
+
+            if _has_arrived(current_url) or settled:
                 cookies = asyncio.run(_read_cookies(info["webSocketDebuggerUrl"]))
                 # An OAuth round trip passes through plenty of non-login URLs, so
                 # the destination alone is not proof. The session cookie is.
                 if _has_auth_cookie(cookies):
                     by_host: dict[str, dict[str, str]] = {}
-                    for candidate in {host, (urlparse(current_url).hostname or "").lower()}:
+                    # Every tenant host holding a session, not just the two that
+                    # happen to be named in the URL: a folder share is listed
+                    # against the tenant host, which the address may never show.
+                    candidates = {host, (urlparse(current_url).hostname or "").lower()}
+                    candidates |= _session_hosts(cookies)
+                    for candidate in candidates:
                         if candidate:
                             found = _matching(cookies, candidate)
                             if found:
@@ -403,12 +553,12 @@ def sign_in(
             time.sleep(0.8)
 
         raise SignInError(
-            "Timed out waiting for the sign-in to finish. Complete the sign-in in "
-            "the browser window, or use \"Paste a signed-in session\"."
+            "Timed out waiting for the sign-in to finish. The window was last on "
+            f"{current_url or 'no page ClipDesk could see'}. Complete the sign-in "
+            "in the browser window, or use \"Paste a signed-in session\"."
         )
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        # Only close what this call opened. A window the user already had open is
+        # theirs, and killing it is what left the profile in a state where the
+        # next sign-in could not be reached.
+        _stop(process)
