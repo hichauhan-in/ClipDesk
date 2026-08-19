@@ -488,7 +488,10 @@ video { width: 100%; border-radius: var(--radius-sm); background: #000; display:
 .chapter:hover { border-left-color: var(--accent-dim); }
 .chapter h4 { margin: 0 0 3px; font-size: 14px; font-weight: 600; }
 
-.seg-list { max-height: 460px; overflow-y: auto; }
+/* Grows with the window instead of stopping at a fixed height, which left the
+   transcript card short beside the taller column next to it. Every bound is two
+   rows (2 x 32px) below where it started, so the trim is the same at any size. */
+.seg-list { max-height: clamp(396px, calc(100vh - 354px), 1036px); overflow-y: auto; }
 .seg {
   display: grid; grid-template-columns: 62px 1fr; gap: 10px;
   padding: 5px 8px; border-radius: var(--radius-sm); cursor: pointer;
@@ -923,6 +926,28 @@ button.choice .row { gap: 8px; flex-wrap: wrap; }
    what the setting would be. */
 .model-controls.is-locked { opacity: 0.45; pointer-events: none; }
 .auto-plan { margin-top: 12px; }
+.ask-card textarea {
+  width: 100%; resize: vertical; min-height: 62px;
+  padding: 8px 10px; font: inherit; font-size: 13px;
+}
+.ask-controls {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-top: 8px;
+}
+.ask-answer:not(:empty) {
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-soft);
+}
+.ask-text { font-size: 13px; line-height: 1.55; }
+.ask-text h4 { margin: 12px 0 4px; font-size: 13px; }
+.ask-text ul { margin: 4px 0; padding-left: 18px; }
+.ask-text p:first-child { margin-top: 0; }
+/* The model went outside the recording, which the reader has to be told. */
+.ask-note {
+  margin-top: 10px; padding: 7px 9px; font-size: 12px; line-height: 1.45;
+  border-left: 3px solid #b98900; border-radius: var(--radius-sm);
+  background: #241f12; color: var(--text-muted);
+}
+.ask-cost { margin-top: 8px; }
 .auto-plan-table {
   margin-top: 6px; table-layout: fixed;
   border: 1px solid var(--border-soft); border-radius: var(--radius-sm);

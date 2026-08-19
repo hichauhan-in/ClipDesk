@@ -35,7 +35,7 @@ from typing import Any
 from clipdesk.llm.base import Usage
 
 #: The tasks that spend tokens, in the order a user meets them.
-TASKS: tuple[str, ...] = ("analyse", "notes", "article", "clips")
+TASKS: tuple[str, ...] = ("analyse", "notes", "article", "clips", "ask")
 
 #: What each task is called on the settings screen.
 TASK_LABELS: dict[str, str] = {
@@ -43,6 +43,7 @@ TASK_LABELS: dict[str, str] = {
     "notes": "Notes",
     "article": "Article",
     "clips": "Clip search",
+    "ask": "Ask",
 }
 
 
@@ -139,7 +140,8 @@ LEVELS: tuple[Budget, ...] = (
         include_timestamps=False,
         include_diagrams=False,
         max_enrichment=0,
-        model_tier={"analyse": "small", "notes": "small", "article": "small", "clips": "small"},
+        model_tier={"analyse": "small", "notes": "small", "article": "small", "clips": "small",
+                    "ask": "small"},
     ),
     Budget(
         level=1,
@@ -153,7 +155,8 @@ LEVELS: tuple[Budget, ...] = (
         include_timestamps=False,
         include_diagrams=False,
         max_enrichment=1,
-        model_tier={"analyse": "small", "notes": "small", "article": "balanced", "clips": "small"},
+        model_tier={"analyse": "small", "notes": "small", "article": "balanced", "clips": "small",
+                    "ask": "small"},
     ),
     Budget(
         level=2,
@@ -173,6 +176,7 @@ LEVELS: tuple[Budget, ...] = (
             "notes": "balanced",
             "article": "balanced",
             "clips": "small",
+            "ask": "balanced",
         },
     ),
     Budget(
@@ -192,6 +196,7 @@ LEVELS: tuple[Budget, ...] = (
             "notes": "balanced",
             "article": "strong",
             "clips": "balanced",
+            "ask": "balanced",
         },
     ),
     Budget(
@@ -211,6 +216,7 @@ LEVELS: tuple[Budget, ...] = (
             "notes": "strong",
             "article": "strong",
             "clips": "strong",
+            "ask": "strong",
         },
     ),
 )

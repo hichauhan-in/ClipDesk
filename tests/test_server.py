@@ -108,7 +108,13 @@ def test_the_auto_plan_describes_every_pass(client):
     assert response.status_code == 200
     plan = response.json()
     assert plan["level"] == 3
-    assert [task["task"] for task in plan["tasks"]] == ["analyse", "notes", "article", "clips"]
+    assert [task["task"] for task in plan["tasks"]] == [
+        "analyse",
+        "notes",
+        "article",
+        "clips",
+        "ask",
+    ]
     for task in plan["tasks"]:
         assert task["tier"] in {"small", "balanced", "strong"}
         # Blank means nothing is pinned; the automatic pick is reported either

@@ -53,6 +53,7 @@ from clipdesk.actions import (
     OutputError,
     PromptContext,
     apply_bookends,
+    ask as ask_report,
     bundle_outputs,
     copy_into_project,
     delete_output,
@@ -64,8 +65,7 @@ from clipdesk.actions import (
     find_candidates,
     fit_narration,
     generate_article,
-    generate_notes,
-    list_assets,
+    generate_notes,    list_assets,
     list_media,
     media_dir,
     available_styles,
@@ -185,6 +185,7 @@ from clipdesk.server.jobs import KIND_LABEL, KIND_TAB, JobManager
 from clipdesk.server.schemas import (
     AnalyzeRequest,
     ArticleRequest,
+    AskRequest,
     AssetLinksRequest,
     BookendRequest,
     CleanupRequest,
@@ -1650,6 +1651,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             queue=request.queue,
             produces=output_name,
         )
+
+    @app.post("/api/projects/{project_id}/ask")
+    def ask_question(
+        project_id: str, request: AskRequest, app_state: UserState = Depends(current)
+    ) -> dict[str, Any]:
+        """Answer one question inline. Short enough not to be worth a job."""
+        project = require_project(project_id, app_state)
+        report = require_report(project)
+        llm = app_state.llm(duration_s=report.media.duration_s)
+        try:
+            answer = ask_report(report, request.question, llm, grounded=request.grounded)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LLMError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            track_tokens(project, llm)
+
+        usage = llm.meter.to_dict()
+        return {
+            "answer": answer.text,
+            "went_beyond": answer.went_beyond,
+            "grounded": answer.grounded,
+            # Returned with the answer so the cost of asking is visible where it
+            # was incurred, rather than only in the Library total.
+            "usage": {**usage, **credits_for_tokens(usage)},
+        }
 
     @app.post("/api/projects/{project_id}/cleanup/plan")
     def preview_cleanup(

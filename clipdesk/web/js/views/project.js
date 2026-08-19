@@ -3,7 +3,7 @@
 import { api } from "../api.js";
 import { candidatePicker } from "../candidates.js";
 import { confirmAction, debounce, h, mount, numberField, openDialog, toast } from "../dom.js";
-import { bytes, duration, timecode } from "../format.js";
+import { bytes, compactCount, duration, timecode } from "../format.js";
 import { createJobPanel } from "../jobpanel.js";
 import { createJobsChip } from "../jobschip.js";
 import { latestForTab, refreshJobs } from "../jobs.js";
@@ -383,9 +383,98 @@ function overviewTab(project, analysis, jobPanel, ctx) {
           { onclick: () => startAnalysis(project, jobPanel, ctx) },
           "Analyse again"
         )
-      )
+      ),
+      askCard(project)
     )
   );
+}
+
+/**
+ * A question box over the finished analysis. Answered from the report rather
+ * than the transcript, so asking is cheap enough to do casually, and answered
+ * inline rather than as a job because waiting on a progress bar for two
+ * sentences would be worse than the wait itself.
+ */
+function askCard(project) {
+  const box = h("textarea", {
+    rows: 3,
+    placeholder: "What was decided about the rollout?",
+    "aria-label": "Ask about this recording",
+  });
+  const grounded = h("input", { type: "checkbox", checked: true });
+  const send = h("button.btn.btn-sm.btn-primary", "Ask");
+  const answer = h("div.ask-answer");
+  let busy = false;
+
+  async function run() {
+    const question = box.value.trim();
+    if (!question || busy) return;
+    busy = true;
+    send.disabled = true;
+    send.textContent = "Thinking…";
+    mount(answer, h("div.faint.small", "Reading the analysis…"));
+    try {
+      const reply = await api.ask(project.id, { question, grounded: grounded.checked });
+      mount(answer, ...answerBlocks(reply));
+    } catch (error) {
+      mount(answer, h("div.small", { style: { color: "var(--danger, #e5484d)" } }, error.message));
+    } finally {
+      busy = false;
+      send.disabled = false;
+      send.textContent = "Ask";
+    }
+  }
+
+  send.onclick = run;
+  // Enter sends, Shift+Enter breaks the line: the box is for a question, not prose.
+  box.onkeydown = (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      run();
+    }
+  };
+
+  return h(
+    "div.card.ask-card",
+    h("h3", "Ask"),
+    h("p.muted.small", "Ask anything about this recording. Answered from the analysis."),
+    box,
+    h(
+      "div.ask-controls",
+      h(
+        "label.check.small",
+        grounded,
+        h("span", { title: "Off lets the model add general knowledge, marked separately." },
+          "Stay in the recording")
+      ),
+      send
+    ),
+    answer
+  );
+}
+
+function answerBlocks(reply) {
+  const blocks = [h("div.ask-text", { html: markdownToHtml(reply.answer || "") })];
+  if (reply.went_beyond) {
+    blocks.push(
+      h(
+        "div.ask-note",
+        "Part of this answer is below “Beyond the recording”. That was added by the " +
+          "model from its own knowledge — it was not said in the video."
+      )
+    );
+  }
+  const usage = reply.usage || {};
+  if (usage.total_tokens) {
+    const credits = usage.credits ? `${usage.credits.toFixed(2)} credits` : "under 0.01 credits";
+    blocks.push(
+      h(
+        "div.faint.small.ask-cost",
+        `${compactCount(usage.total_tokens)} tokens · ${credits}${usage.measured ? "" : " (estimated)"}`
+      )
+    );
+  }
+  return blocks;
 }
 
 function timelineCard(analysis) {
@@ -698,7 +787,9 @@ function enrichmentSlider(warning) {
     slider,
     h(
       "div.row.faint.small",
-      { style: { justifyContent: "space-between", marginTop: "-2px" } },
+      // The thumb is 17px on a 6px track, so it overhangs; without this the
+      // labels sit under the ball rather than below it.
+      { style: { justifyContent: "space-between", marginTop: "8px" } },
       h("span", "Transcript"),
       h("span", "Expert reference")
     ),

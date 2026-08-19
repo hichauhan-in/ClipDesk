@@ -41,7 +41,6 @@ class NotesRequest(Queueable):
 class ArticleRequest(Queueable):
     """Write one article from the recording, as Markdown or as the Word template."""
 
-    #: "md" is free-form; "docx" fills the supplied knowledge-article template.
     format: Literal["md", "docx"] = "docx"
     #: Which sections of the template carry content.
     shape: Literal["break-fix", "how-to", "reference"] = "break-fix"
@@ -56,6 +55,15 @@ class ArticleRequest(Queueable):
     #: Ask for a Mermaid diagram. Ignored for Word, which cannot render one.
     include_diagram: bool = True
     output_name: str = Field(default="", max_length=200)
+
+
+class AskRequest(BaseModel):
+    """One question about a recording that has already been analysed."""
+
+    question: str = Field(min_length=1, max_length=2000)
+    #: True answers only from the recording. False allows general knowledge,
+    #: which the answer then has to separate out under its own heading.
+    grounded: bool = True
 
 
 class ClipFindRequest(Queueable):

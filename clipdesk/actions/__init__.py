@@ -5,6 +5,7 @@ from clipdesk.actions.article import (
     ARTICLE_SHAPES,
     generate_article,
 )
+from clipdesk.actions.ask import BEYOND_HEADING, ask
 from clipdesk.actions.bookends import (
     ASSET_SUFFIXES,
     apply_bookends,
@@ -81,6 +82,7 @@ __all__ = [
     "MODES",
     "ARTICLE_FORMATS",
     "ARTICLE_SHAPES",
+    "BEYOND_HEADING",
     "TRANSCRIPT_FORMATS",
     "CandidateResult",
     "CleanupOptions",
@@ -115,8 +117,7 @@ __all__ = [
     "plan_export",
     "render_export",
     "find_candidates",
-    "generate_article",
-    "generate_notes",
+    "generate_article",    "generate_notes",
     "import_custom_style",
     "install_catalog_style",
     "list_assets",

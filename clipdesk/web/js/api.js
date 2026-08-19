@@ -54,8 +54,7 @@ export const api = {
   shutdown: (force = false) =>
     request("/api/shutdown", { method: "POST", body: { force } }),
 
-  listProjects: () => request("/api/projects"),
-  getProject: (id) => request(`/api/projects/${id}`),
+  listProjects: () => request("/api/projects"),  getProject: (id) => request(`/api/projects/${id}`),
   deleteProject: (id) => request(`/api/projects/${id}`, { method: "DELETE" }),
   getAnalysis: (id) => request(`/api/projects/${id}/analysis`),
 
@@ -73,7 +72,9 @@ export const api = {
   analyze: (id, body) => request(`/api/projects/${id}/analyze`, { method: "POST", body }),
   notes: (id, body) => request(`/api/projects/${id}/notes`, { method: "POST", body }),
   articleOptions: () => request("/api/article/options"),
-  llmPlan: (level) => request(`/api/llm/plan?level=${level}`),  article: (id, body) => request(`/api/projects/${id}/article`, { method: "POST", body }),
+  llmPlan: (level) => request(`/api/llm/plan?level=${level}`),
+  article: (id, body) => request(`/api/projects/${id}/article`, { method: "POST", body }),
+  ask: (id, body) => request(`/api/projects/${id}/ask`, { method: "POST", body }),
   cleanupPlan: (id, body) =>
     request(`/api/projects/${id}/cleanup/plan`, { method: "POST", body }),
   cleanup: (id, body) => request(`/api/projects/${id}/cleanup`, { method: "POST", body }),
