@@ -109,7 +109,7 @@ def classify(raw: str) -> Link:
     host = _hostname(url)
 
     if host in _YOUTUBE_HOSTS:
-        return Link(LinkKind.YOUTUBE, url, url, note="YouTube")
+        return Link(LinkKind.YOUTUBE, url, url, note="Video link")
 
     if host in _GOOGLE_DRIVE_HOSTS:
         return _google_drive(url)

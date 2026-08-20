@@ -83,6 +83,7 @@ export const api = {
     request(`/api/projects/${id}/clips/render`, { method: "POST", body }),
   bookend: (id, body) => request(`/api/projects/${id}/bookend`, { method: "POST", body }),
   intro: (id, body) => request(`/api/projects/${id}/intro`, { method: "POST", body }),
+  outro: (id, body) => request(`/api/projects/${id}/outro`, { method: "POST", body }),
   introStyles: () => request("/api/intro/styles"),
   introAudio: () => request("/api/intro/audio"),
   refreshIntroVoices: () =>
@@ -108,6 +109,16 @@ export const api = {
   exportTranscript: (id, format) =>
     request(`/api/projects/${id}/transcript`, { method: "POST", body: { format } }),
   exportSummary: (id) => request(`/api/projects/${id}/summary`, { method: "POST" }),
+
+  listFlows: () => request("/api/flows"),
+  saveFlow: (id, body) =>
+    request(`/api/flows/${encodeURIComponent(id)}`, { method: "PUT", body }),
+  deleteFlow: (id) =>
+    request(`/api/flows/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runFlow: (projectId, flowId) =>
+    request(`/api/projects/${projectId}/flows/${encodeURIComponent(flowId)}/run`, {
+      method: "POST",
+    }),
 
   listOutputs: (id) => request(`/api/projects/${id}/outputs`),
 

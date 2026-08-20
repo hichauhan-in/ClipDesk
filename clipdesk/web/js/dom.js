@@ -3,6 +3,8 @@
 import { notify } from "./notifications.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
+const TITLE_TAGS = new Set(["H1", "H2", "H3", "H4", "H5", "H6", "LEGEND", "SUMMARY"]);
+const TITLE_CLASSES = new Set(["nav-group", "soundtrack-group-head", "section-title"]);
 // SVG lives in its own namespace. Built with createElement it becomes an unknown
 // HTML element: it lays out as zero by zero and paints nothing, which is a
 // silent failure rather than an error.
@@ -48,8 +50,23 @@ export function h(spec, props, ...children) {
 function append(parent, children) {
   for (const child of children.flat(6)) {
     if (child === null || child === undefined || child === false || child === true) continue;
-    parent.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    const value = child instanceof Node ? child : document.createTextNode(
+      isTitleContainer(parent) ? capitalizeFirst(String(child)) : String(child)
+    );
+    parent.append(value);
   }
+}
+
+function isTitleContainer(element) {
+  return TITLE_TAGS.has(element.tagName)
+    || element.getAttribute?.("role") === "tab"
+    || [...TITLE_CLASSES].some((name) => element.classList?.contains(name));
+}
+
+function capitalizeFirst(value) {
+  return value.replace(/^(\s*)(\p{L})/u, (_match, space, letter) => {
+    return space + letter.toLocaleUpperCase();
+  });
 }
 
 export function mount(target, ...children) {

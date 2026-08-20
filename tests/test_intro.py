@@ -12,6 +12,7 @@ from clipdesk.actions.intro import (
     import_custom_style,
     install_catalog_style,
     plan_intro,
+    plan_outro,
     resolve_style,
     shot_anchors,
     shot_labels,
@@ -33,7 +34,7 @@ def test_every_built_in_style_is_installed_and_uniquely_named(tmp_path):
     ids = [style.id for style in (*BUILT_IN_STYLES, *CATALOG_STYLES)]
 
     assert len(BUILT_IN_STYLES) == 18
-    assert len(CATALOG_STYLES) == 18
+    assert len(CATALOG_STYLES) == 26
     assert len(styles) == len(BUILT_IN_STYLES)
     assert len(ids) == len(set(ids))
     assert resolve_style(tmp_path, "prestige").title_animation == "band-reveal"
@@ -267,6 +268,33 @@ def test_the_plan_can_describe_itself():
 
     assert len(described) == len(plan.scenes)
     assert any(line.startswith("Title reveal") for line in described)
+
+
+@pytest.mark.parametrize("seconds", [5.0, 8.0, 15.0, 30.0])
+def test_outro_is_title_cards_only_and_honours_runtime(seconds):
+    plan = plan_outro(
+        BUILT_IN_STYLES[0], total_seconds=seconds, source_duration=120.0,
+        include_final_message=True,
+    )
+
+    assert [scene.kind for scene in plan.scenes] == ["title", "end-card"]
+    assert plan.shots == ()
+    assert plan.total_seconds == pytest.approx(seconds, abs=0.001)
+    assert len({scene.span for scene in plan.scenes}) == 1
+
+
+def test_outro_without_an_optional_final_message_uses_one_title_card():
+    plan = plan_outro(
+        BUILT_IN_STYLES[0], total_seconds=8.0, source_duration=120.0
+    )
+
+    assert [scene.kind for scene in plan.scenes] == ["title"]
+    assert plan.total_seconds == pytest.approx(8.0)
+
+
+def test_outro_rejects_an_unknown_source_duration():
+    with pytest.raises(ValueError, match="source duration"):
+        plan_outro(BUILT_IN_STYLES[0], total_seconds=8.0, source_duration=0.0)
 
 
 # --- shot selection -----------------------------------------------------------

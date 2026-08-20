@@ -61,6 +61,28 @@ def resolve_media(project: Project, name: str) -> Path:
     return candidate
 
 
+def resolve_attachment(project: Project, name: str) -> Path:
+    """Media to attach, from what was imported or from what this project rendered.
+
+    An intro built with the Intro tool is an output, not an import, so restricting
+    this to the media folder made a project unable to attach the very thing it
+    had just produced. Both folders are matched by exact parent, so a name can
+    still only ever reach inside this project.
+    """
+    try:
+        return resolve_media(project, name)
+    except ValueError:
+        pass
+
+    directory = project.output_dir.resolve()
+    candidate = (directory / name).resolve()
+    if candidate.parent != directory or not candidate.is_file():
+        raise ValueError(f"No such media in this project: {name}")
+    if candidate.suffix.lower() not in ASSET_SUFFIXES:
+        raise ValueError(f"{name} is not a video that can be attached.")
+    return candidate
+
+
 def store_media(source: Path, project: Project, name: str = "") -> Path:
     """Move a staged video into one project without overwriting an existing file."""
     suffix = source.suffix.lower()

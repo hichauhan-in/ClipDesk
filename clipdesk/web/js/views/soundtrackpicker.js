@@ -10,6 +10,7 @@ export function createSoundtrackPicker({ onChange } = {}) {
   const audio = new Audio();
   let value = "";
   let playingId = "";
+  let playbackToken = 0;
   let rows = [];
 
   const label = h("span.soundtrack-value", "Choose a soundtrack");
@@ -34,25 +35,31 @@ export function createSoundtrackPicker({ onChange } = {}) {
   }
 
   function stop() {
+    playbackToken += 1;
     audio.pause();
     audio.currentTime = 0;
+    audio.removeAttribute("src");
+    audio.load();
     playingId = "";
     for (const row of rows) row.button.textContent = "▶";
   }
 
-  function play(item, button) {
+  async function play(item, button) {
     if (playingId === item.id) {
       stop();
       return;
     }
     stop();
+    const token = playbackToken;
     playingId = item.id;
     button.textContent = "■";
     audio.src = `/api/intro/audio/preview?audio_id=${encodeURIComponent(item.id)}`;
-    audio.play().catch(() => {
-      button.textContent = "▶";
-      playingId = "";
-    });
+    audio.load();
+    try {
+      await audio.play();
+    } catch {
+      if (token === playbackToken) stop();
+    }
   }
 
   audio.onended = () => stop();
@@ -66,19 +73,21 @@ export function createSoundtrackPicker({ onChange } = {}) {
           "div.soundtrack-group",
           h("div.soundtrack-group-head", group.label),
           group.items.map((item) => {
-            const button = h(
-              "button.soundtrack-play",
-              {
-                type: "button",
-                title: `Hear ${item.name}`,
-                "aria-label": `Hear ${item.name}`,
-                onclick: (event) => {
-                  event.stopPropagation();
-                  play(item, button);
-                },
-              },
-              "▶"
-            );
+            const button = item.previewable === false
+              ? h("span.soundtrack-play", { "aria-hidden": "true" }, "")
+              : h(
+                  "button.soundtrack-play",
+                  {
+                    type: "button",
+                    title: `Hear ${item.name}`,
+                    "aria-label": `Hear ${item.name}`,
+                    onclick: (event) => {
+                      event.stopPropagation();
+                      play(item, button);
+                    },
+                  },
+                  "▶"
+                );
             const row = h(
               "div.soundtrack-row",
               {
@@ -121,6 +130,7 @@ export function createSoundtrackPicker({ onChange } = {}) {
   }
 
   function select(next) {
+    stop();
     value = next;
     markSelection();
     setOpen(false);

@@ -444,6 +444,71 @@ CATALOG_STYLES = (
         grade="faded", duration=10, shots=6, title_seconds=1.9,
         transition_seconds=0.26, source="catalog",
     ),
+    _style(
+        "executive-close", "Executive close",
+        "Precise side panel, restrained movement and a confident corporate finish.",
+        accent="#10b981", backdrop="dark-panel", title_animation="side-panel",
+        shot_motions=("hold", "drift"), transition="fade",
+        grade="clean", duration=10, shots=3, grain=False, light_sweep=False,
+        transition_seconds=0.4, source="catalog",
+    ),
+    _style(
+        "aurora-lines", "Aurora lines",
+        "Luminous gradient, stacked typography and smooth lateral movement.",
+        accent="#34d399", backdrop="gradient", title_animation="stack-lines",
+        shot_motions=("glide", "pull-back"), transition="smoothleft",
+        grade="cool", duration=13, shots=5, transition_seconds=0.42,
+        source="catalog",
+    ),
+    _style(
+        "clean-thanks", "Clean thanks",
+        "Minimal grid, centred message and quiet fades designed for sign-offs.",
+        accent="#f8fafc", backdrop="grid", title_animation="center-pop",
+        shot_motions=("hold",), transition="fade",
+        grade="clean", duration=8, shots=2, grain=False, vignette=False,
+        light_sweep=False, hook=False, kicker=False, transition_seconds=0.35,
+        source="catalog",
+    ),
+    _style(
+        "warm-signoff", "Warm sign-off",
+        "Soft golden blur, generous title reveal and an unhurried closing tone.",
+        accent="#fbbf24", backdrop="source-blur", title_animation="band-reveal",
+        shot_motions=("drift", "pull-back"), transition="dissolve",
+        grade="warm", duration=11, shots=3, transition_seconds=0.58,
+        source="catalog",
+    ),
+    _style(
+        "product-stage", "Product stage",
+        "Spotlit product language, splitting bars and a directional reveal.",
+        accent="#22d3ee", backdrop="stage", title_animation="split-bars",
+        shot_motions=("punch-in", "hold"), transition="coverleft",
+        grade="crisp", duration=10, shots=4, grain=False,
+        transition_seconds=0.32, source="catalog",
+    ),
+    _style(
+        "social-burst", "Social burst",
+        "Saturated duotone, flash title and rapid zoom energy for short-form video.",
+        accent="#fb7185", backdrop="duotone", title_animation="flash-cut",
+        shot_motions=("whip", "punch-in"), transition="zoomin",
+        grade="vivid", duration=7, shots=6, title_seconds=1.6,
+        transition_seconds=0.2, letterbox=False, source="catalog",
+    ),
+    _style(
+        "conference-stage", "Conference stage",
+        "Measured stage backdrop and broadcast lower third for event recordings.",
+        accent="#60a5fa", backdrop="stage", title_animation="lower-third",
+        shot_motions=("hold", "glide"), transition="smoothright",
+        grade="cinematic", duration=14, shots=4, transition_seconds=0.5,
+        source="catalog",
+    ),
+    _style(
+        "paper-title", "Paper title",
+        "Editorial monochrome title with calm holds and a clean horizontal reveal.",
+        accent="#d4d4d8", backdrop="dark-panel", title_animation="band-reveal",
+        shot_motions=("hold", "tilt"), transition="revealright",
+        grade="mono", duration=12, shots=4, grain=False,
+        transition_seconds=0.38, source="catalog",
+    ),
 )
 
 
@@ -714,6 +779,42 @@ def plan_intro(
         for left, right in zip(scenes, scenes[1:])
     )
     return IntroPlan(scenes=tuple(scenes), total_seconds=total, transition_seconds=overlap)
+
+
+def plan_outro(
+    style: IntroStyle,
+    *,
+    total_seconds: float,
+    source_duration: float,
+    include_final_message: bool = False,
+) -> IntroPlan:
+    """Lay out a closing title sequence without sampling source moments."""
+    if total_seconds <= 0:
+        raise ValueError("An outro needs a positive length.")
+    if source_duration <= 0:
+        raise ValueError("The source duration is unknown.")
+
+    overlap = min(style.transition_seconds, total_seconds / 6)
+    anchor = max(0.0, source_duration - 0.05)
+    still = _span_at(anchor, min(0.05, source_duration), source_duration)
+    if not include_final_message:
+        return IntroPlan(
+            scenes=(IntroScene(kind="title", duration=total_seconds, span=still),),
+            total_seconds=total_seconds,
+            transition_seconds=overlap,
+        )
+
+    first_seconds = total_seconds * 0.58 + overlap / 2
+    final_seconds = total_seconds - first_seconds + overlap
+    scenes = (
+        IntroScene(kind="title", duration=first_seconds, span=still),
+        IntroScene(kind="end-card", duration=final_seconds, span=still),
+    )
+    return IntroPlan(
+        scenes=scenes,
+        total_seconds=first_seconds + final_seconds - overlap,
+        transition_seconds=overlap,
+    )
 
 
 def shot_labels(spans: list[Span], report: AnalysisReport | None) -> list[str]:

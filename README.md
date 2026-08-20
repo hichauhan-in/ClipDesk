@@ -191,7 +191,6 @@ On the **Library** screen there are three ways in.
 ```
 https://onedrive.cloud.microsoft/:v:/a@tenant/S/IQB1basQ...
 https://contoso.sharepoint.com/teams/Team/_layouts/15/stream.aspx?id=...
-https://www.youtube.com/watch?v=...
 ```
 
 A public link downloads straight away. A link only your organisation can see
@@ -230,7 +229,8 @@ timeline showing where the value is.
 | --- | --- |
 | **Transcript & Notes** | Timestamped searchable transcript with `.srt`/`.vtt`/`.md`/`.txt` download, Markdown study notes with diagrams and a slider for how much the AI may add, and a knowledge article — same slider — as Markdown or in the Word template |
 | **Cuts** | A clean cut that strips silence, filler, logistics and off-topic chatter, or a clip by length, by topic, or as standalone highlights on a 16:9 canvas |
-| **Editor** | One prompt that plans any edit, an intro studio, and clipping that trims and attaches a branded intro and outro |
+| **Editor** | One prompt that plans any edit, Intro and Outro builders, and clipping that trims and attaches branded bookends |
+| **Flows** | Saved, reusable Notes → Clean cut/Clip → Intro/Outro → Assemble routines that run in order after analysis |
 | **Outputs** | Play, save in a chosen format and quality, bundle as ZIP, delete, open the folder |
 
 Nothing is encoded until you have seen the options and chosen. Anything slow can
@@ -412,41 +412,9 @@ sitting on the machine.
 | **OneDrive link** | Yes | Public shares directly; tenant shares after sign-in |
 | **A shared folder link** | Yes | Contents are listed so you can choose |
 | **Google Drive** | Yes | Set sharing to "Anyone with the link" |
-| **YouTube** | Yes | Uses the media extractor — see the note on Node.js below |
 | **Vimeo, Loom, Panopto, Kaltura, Echo360** | Yes | Uses the media extractor |
 | **Direct file URL** | Yes | Fastest path — a plain streamed download |
 | **Upload** | Yes | Drag and drop, with an optional `.srt`/`.vtt` |
-
-### YouTube needs Node.js installed
-
-YouTube signs its download URLs with a challenge that only runs as JavaScript.
-The extractor can solve it, but only with a JavaScript runtime available, and
-the one it enables by default — deno — is not something most machines have. So
-the practical requirement is **[Node.js](https://nodejs.org)**: install it and
-ClipDesk finds it on `PATH` by itself, with nothing to configure.
-
-Without one, the challenge goes unsolved, the usable formats are dropped, and
-the download ends as `HTTP Error 403: Forbidden` — which reads like a sign-in
-problem and is not one. ClipDesk checks for a runtime before blaming your
-session, so the message says which it is.
-
-Separately, ClipDesk pins which YouTube player clients the extractor may use,
-because its default resolves to one whose media URLs are refused. The choice
-also decides what quality you get: some clients only offer 360p for a given
-video, so a list can succeed and still be the wrong answer. When YouTube next
-changes this, the working set can be swapped without a code change:
-
-```yaml
-# config/local.yaml
-ingest:
-  youtube_player_clients: mweb,tv_simply,web_embedded,android   # empty = extractor's own default
-```
-
-To find out which still work, and at what resolution:
-
-```powershell
-.\.venv\Scripts\python.exe tools\probe_youtube.py [URL]
-```
 
 ### Getting to tenant content
 
@@ -682,7 +650,7 @@ until analysis succeeds.
 
 **Project media** sits beside the import panel in Editor, as a filterable list
 in a fixed window rather than a column that grows without end. Import videos
-from disk, SharePoint, OneDrive, YouTube or another supported link. Media
+from disk, SharePoint, Stream or OneDrive. Media
 belongs to the project it was imported into — nothing appears in another project
 by itself. *Browse other projects* offers what other projects hold and copies a
 chosen file in, so the two copies stay independent.
@@ -726,9 +694,8 @@ animation, a list of shot motions, a transition and a grade. Imported JSON style
 are validated against those enumerations; raw ffmpeg filters, arguments and
 executable fields are rejected.
 
-The library accepts a local MP4, MOV, MKV or WebM upload, or any video link that
-ClipDesk can import: SharePoint, OneDrive, YouTube, a supported video platform,
-or a direct file URL. A SharePoint or OneDrive folder is listed first so you can
+The library accepts a local MP4, MOV, MKV or WebM upload, or a SharePoint,
+Stream or OneDrive link. A SharePoint or OneDrive folder is listed first so you can
 select several videos; they are downloaded as one background job and added to
 the project without overwriting files that share a name. Imported media belongs
 to the project it was added to; media from another project is offered only when
@@ -738,6 +705,18 @@ Prompt-based editing ("drop the first two minutes", "tighten the pauses but keep
 every question") remains outside the constrained first version because those
 operations require transcript-aware semantic decisions. The available prompt
 operations are shown in the Editor and run entirely through local ffmpeg.
+
+### Flows
+
+Flows turn a repeated post-analysis routine into one saved run. Steps are
+single-open collapsible sections and can be reordered. Add Notes, Clean cut,
+fixed-time Clip, automatic Best/Topic highlight, constrained Prompt edit, Intro,
+Outro and Assemble steps. Every video-producing step has a named output; compatible
+steps below it choose that filename under **Source video**, so renaming a Clean cut
+also updates downstream references. Generated files can be passed forward before
+they exist because jobs run in dependency order. A bookend may instead reference
+an absolute local video path, which ClipDesk copies into each project when the Flow
+runs. Server-local paths are intentionally unavailable in hosted multi-user mode.
 
 ### Outputs
 
@@ -754,7 +733,7 @@ anything heavy running locally.
 
 ```mermaid
 flowchart LR
-    L["Link<br/>SharePoint · Drive · YouTube"] --> A
+  L["Link<br/>SharePoint · Stream · OneDrive"] --> A
     U["or upload<br/>video (+ .srt/.vtt)"] --> A
 
     subgraph A["ClipDesk server (localhost)"]
@@ -1252,14 +1231,6 @@ of the other three routes.
 
 **"The media extractor is not installed"** — open Settings → Dependencies and
 install it. Without it, only direct file links work.
-
-**A YouTube link fails with `HTTP Error 403: Forbidden`** — install
-[Node.js](https://nodejs.org). YouTube signs its downloads with a JavaScript
-challenge, and without a runtime to solve it the formats are dropped and the
-request is refused. It looks like a sign-in problem and is not one. If it still
-fails afterwards, run `.\.venv\Scripts\python.exe tools\probe_youtube.py` to see
-which player clients currently work and at what resolution, then set
-`ingest.youtube_player_clients` accordingly.
 
 **Analysis finished but there are no chapters** — the report's warnings say why.
 Usually the provider was unreachable, or the Copilot CLI hit one of its bad

@@ -76,6 +76,7 @@ from clipdesk.actions import (
     plan_cleanup,
     plan_export,
     plan_intro,
+    plan_outro,
     plan_prompt,
     render_cleanup,
     render_edit,
@@ -85,6 +86,7 @@ from clipdesk.actions import (
     resolve_style,
     render_selection,
     resolve_asset,
+    resolve_attachment,
     resolve_media,
     reveal,
     rename_output,
@@ -166,6 +168,19 @@ from clipdesk.llm.budget import TASK_LABELS, budget_for, pick_model, rank_models
 from clipdesk.llm.credits import credits_for_tokens
 from clipdesk.llm.presets import get as get_preset
 from clipdesk.llm.registry import build_provider
+from clipdesk.flows import (
+    FlowAssembleStep,
+    FlowBookendStep,
+    FlowCleanupStep,
+    FlowClipStep,
+    FlowDefinition,
+    FlowHighlightStep,
+    FlowNotesStep,
+    FlowPromptStep,
+    delete_flow,
+    load_flows,
+    save_flow,
+)
 from clipdesk.media.ffmpeg import find_tools
 from clipdesk.media.soundtrack import (
     AUDIO_SUFFIXES,
@@ -1859,9 +1874,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tools = app_state.ffmpeg()
         settings = app_state.settings
 
+        def queued_attachment(name: str | None) -> Path | None:
+            if not name:
+                return None
+            try:
+                return resolve_attachment(project, name)
+            except ValueError:
+                if request.queue and name in pending_outputs(app_state, project):
+                    return project.output_path(safe_filename(name))
+                raise
+
         try:
-            header = resolve_media(project, request.header_asset) if request.header_asset else None
-            footer = resolve_media(project, request.footer_asset) if request.footer_asset else None
+            header = queued_attachment(request.header_asset)
+            footer = queued_attachment(request.footer_asset)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         trimming = request.trim_start > 0.0 or request.trim_end is not None
@@ -1904,9 +1929,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post("/api/projects/{project_id}/intro")
+    @app.post("/api/projects/{project_id}/outro")
     def start_intro(
         project_id: str,
         request: IntroRequest,
+        http_request: Request,
         app_state: UserState = Depends(current),
     ) -> dict[str, Any]:
         project = require_project(project_id, app_state)
@@ -1924,19 +1951,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if report
             else "A visual overview created from the source video."
         )
-        title = request.title.strip() or analysed_title
-        subtitle = request.subtitle.strip() or _first_sentence(analysed_summary)
-        end_card_text = request.end_card_text.strip()
-
-        plan = plan_intro(
-            style,
-            total_seconds=request.duration_seconds,
-            shot_count=request.shot_count,
-            source_duration=media.duration_s,
-            report=report,
-            subtitle=subtitle,
+        is_outro = http_request.url.path.rstrip("/").endswith("/outro")
+        title = request.title.strip() or (
+            "Thank you for watching" if is_outro else analysed_title
         )
-        if request.show_shot_tags:
+        subtitle = request.subtitle.strip() or (
+            analysed_title if is_outro else _first_sentence(analysed_summary)
+        )
+        end_card_text = request.end_card_text.strip() or (
+            "See you next time" if is_outro and request.include_final_message else ""
+        )
+
+        plan = (
+            plan_outro(
+                style,
+                total_seconds=request.duration_seconds,
+                source_duration=media.duration_s,
+                include_final_message=request.include_final_message,
+            )
+            if is_outro
+            else plan_intro(
+                style,
+                total_seconds=request.duration_seconds,
+                shot_count=request.shot_count,
+                source_duration=media.duration_s,
+                report=report,
+                subtitle=subtitle,
+            )
+        )
+        if request.show_shot_tags and not is_outro:
             spans = [scene.span or (0.0, 0.0) for scene in plan.shots]
             tags = shot_labels(spans, report)
             tagged: list[IntroScene] = []
@@ -1955,7 +1998,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 transition_seconds=plan.transition_seconds,
             )
 
-        output_name = video_output_name(request.output_name, fallback="intro.mp4")
+        sequence_kind = "outro" if is_outro else "intro"
+        output_name = video_output_name(
+            request.output_name, fallback=f"{sequence_kind}.mp4"
+        )
         narration = fit_narration(
             request.voiceover_text.strip() or subtitle or analysed_summary,
             request.duration_seconds,
@@ -1967,20 +2013,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         def work(bus: EventBus) -> dict[str, Any]:
-            stage = "intro"
-            bus.stage_start(stage, f"Building the {style.name} intro")
+            stage = sequence_kind
+            bus.stage_start(stage, f"Building the {style.name} {sequence_kind}")
             path = project.output_path(output_name)
-            with tempfile.TemporaryDirectory(prefix=".intro-", dir=project.output_dir) as name:
+            with tempfile.TemporaryDirectory(
+                prefix=f".{sequence_kind}-", dir=project.output_dir
+            ) as name:
                 voiceover_path: Path | None = None
-                imported_audio = None
-                if request.audio_id.startswith("imported:"):
-                    imported_audio = resolve_audio(app_state.state_dir, request.audio_id)
+                soundtrack_source = (
+                    None
+                    if request.audio_id == "none"
+                    else resolve_audio(app_state.state_dir, request.audio_id)
+                )
                 soundtrack_path = prepare_soundtrack(
                     request.audio_id,
                     plan.total_seconds,
                     Path(name) / "soundtrack.wav",
                     tools.ffmpeg,
-                    imported=imported_audio,
+                    imported=soundtrack_source,
                 )
                 if request.voiceover:
                     bus.progress(stage, None, "Generating local voiceover")
@@ -2003,12 +2053,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     on_progress=lambda fraction: bus.progress(stage, fraction, "Rendering intro"),
                 )
             project.add_artifact(
-                ArtifactKind.INTRO,
-                f"{style.name} intro ({format_duration(plan.total_seconds)})",
+                ArtifactKind.OUTRO if is_outro else ArtifactKind.INTRO,
+                f"{style.name} {sequence_kind} ({format_duration(plan.total_seconds)})",
                 path,
                 duration_s=plan.total_seconds,
                 meta={
                     "style": style.id,
+                    "style_name": style.name,
+                    "sequence_kind": sequence_kind,
                     "scenes": str(len(plan.scenes)),
                     "shots": str(len(plan.shots)),
                     "title": title,
@@ -2019,15 +2071,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "narration": narration if request.voiceover else "",
                 },
             )
-            bus.stage_end(stage, "Intro ready")
+            bus.stage_end(stage, f"{sequence_kind.capitalize()} ready")
             return {"file": path.name, "plan": plan.describe(), "style": style.public()}
 
         return start_job(
             app_state,
-            "intro",
+            sequence_kind,
             project,
             work,
-            label=f"Building the {style.name} intro",
+            label=f"Building the {style.name} {sequence_kind}",
             queue=request.queue,
             produces=output_name,
         )
@@ -2248,8 +2300,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     tools.ffmpeg,
                     bus,
                     body_filename=project.meta.source_filename,
-                    header=resolve_media(project, header) if header else None,
-                    footer=resolve_media(project, footer) if footer else None,
+                    header=resolve_attachment(project, header) if header else None,
+                    footer=resolve_attachment(project, footer) if footer else None,
                     output_name=output_name,
                 )
                 operations = [f"Add {header or footer}"]
@@ -2721,6 +2773,464 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             queue=request.queue,
             produces=plan.output_name,
         )
+
+    # --- flows -------------------------------------------------------------
+    @app.get("/api/flows")
+    def get_flows(app_state: UserState = Depends(current)) -> dict[str, Any]:
+        return {
+            "flows": [flow.model_dump(mode="json") for flow in load_flows(app_state.state_dir)]
+        }
+
+    @app.put("/api/flows/{flow_id}")
+    def put_flow(
+        flow_id: str,
+        flow: FlowDefinition,
+        app_state: UserState = Depends(current),
+    ) -> dict[str, Any]:
+        if flow.id != flow_id:
+            raise HTTPException(status_code=400, detail="The Flow ID does not match its URL.")
+        saved = save_flow(app_state.state_dir, flow)
+        return saved.model_dump(mode="json")
+
+    @app.delete("/api/flows/{flow_id}")
+    def remove_flow(
+        flow_id: str, app_state: UserState = Depends(current)
+    ) -> dict[str, bool]:
+        if not delete_flow(app_state.state_dir, flow_id):
+            raise HTTPException(status_code=404, detail="That Flow does not exist.")
+        return {"deleted": True}
+
+    @app.post("/api/projects/{project_id}/flows/{flow_id}/run")
+    def run_flow(
+        project_id: str,
+        flow_id: str,
+        app_state: UserState = Depends(current),
+    ) -> dict[str, Any]:
+        project = require_project(project_id, app_state)
+        report = require_report(project)
+        flow = next((item for item in load_flows(app_state.state_dir) if item.id == flow_id), None)
+        if flow is None:
+            raise HTTPException(status_code=404, detail="That Flow does not exist.")
+        if app_state.sequence.list(project.id):
+            raise HTTPException(
+                status_code=409,
+                detail="Run or empty the existing queue before starting a Flow.",
+            )
+        if app_state.jobs.active_count(project.id):
+            raise HTTPException(
+                status_code=409,
+                detail="Wait for this project's current job to finish before starting a Flow.",
+            )
+
+        seen_intro = False
+        seen_outro = False
+        available_sources = {"source"}
+        output_names: set[str] = set()
+
+        def step_output(step: Any) -> str:
+            if isinstance(step, FlowCleanupStep):
+                return video_output_name(step.output_name, fallback="cleaned.mp4")
+            if isinstance(step, FlowClipStep):
+                return video_output_name(step.output_name, fallback="clip.mp4")
+            if isinstance(step, FlowHighlightStep):
+                return video_output_name(step.output_name, fallback="highlight.mp4")
+            if isinstance(step, FlowPromptStep):
+                return video_output_name(step.output_name, fallback="prompt-edit.mp4")
+            if isinstance(step, FlowBookendStep) and step.source == "generate":
+                return video_output_name(step.output_name, fallback=f"{step.type}.mp4")
+            if isinstance(step, FlowAssembleStep):
+                return video_output_name(step.output_name, fallback="final.mp4")
+            return ""
+
+        for index, step in enumerate(flow.steps, start=1):
+            if isinstance(step, FlowClipStep) and step.end <= step.start:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Flow step {index}: the clip must end after it starts.",
+                )
+            input_from = getattr(step, "input_from", "source")
+            if isinstance(step, (FlowClipStep, FlowPromptStep, FlowAssembleStep)) or (
+                isinstance(step, FlowBookendStep) and step.source == "generate"
+            ):
+                if input_from not in available_sources:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Flow step {index}: source '{input_from}' must be produced by an earlier step.",
+                    )
+            if isinstance(step, FlowHighlightStep) and step.mode == "topic" and not step.query.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Flow step {index}: enter a topic for the Topic highlight.",
+                )
+            if isinstance(step, FlowBookendStep):
+                if step.source == "local":
+                    if app_state.hosted:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Hosted Flows cannot read server-local file paths.",
+                        )
+                    source = Path(step.local_path).expanduser()
+                    if not source.is_file() or source.suffix.lower() not in ASSET_SUFFIXES:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Flow step {index}: local {step.type} file was not found or is not a supported video.",
+                        )
+                seen_intro = seen_intro or step.type == "intro"
+                seen_outro = seen_outro or step.type == "outro"
+            if isinstance(step, FlowAssembleStep) and not (seen_intro or seen_outro):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Flow step {index}: add an Intro or Outro before Assemble.",
+                )
+
+            output = step_output(step)
+            if output:
+                if output in output_names:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Flow step {index}: '{output}' is already produced by another step.",
+                    )
+                output_names.add(output)
+                available_sources.add(output)
+
+        final_output = ""
+        intro_asset: str | None = None
+        outro_asset: str | None = None
+        queued: list[dict[str, Any]] = []
+
+        def flow_source(name: str) -> Path:
+            return project.source_path if name == "source" else project.output_path(safe_filename(name))
+
+        def add_pending(
+            kind: str,
+            label: str,
+            produces: str,
+            work: Callable[[EventBus], dict[str, Any]],
+            *,
+            tab: str = "flows",
+        ) -> str:
+            pending = app_state.sequence.add(
+                project.id,
+                kind,
+                work,
+                label=label,
+                produces=produces,
+                tab=tab,
+            )
+            queued.append(pending.summary())
+            return produces
+
+        def remember(result: dict[str, Any]) -> str:
+            queued.append(result["step"])
+            return str(result["step"].get("produces") or "")
+
+        def synthetic_request(kind: str) -> Request:
+            path = f"/api/projects/{project.id}/{kind}"
+            return Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": path,
+                    "raw_path": path.encode("ascii"),
+                    "query_string": b"",
+                    "headers": [],
+                    "scheme": "http",
+                    "server": ("localhost", 80),
+                    "client": ("127.0.0.1", 0),
+                    "root_path": "",
+                }
+            )
+
+        try:
+            for step in flow.steps:
+                if isinstance(step, FlowNotesStep):
+                    remember(
+                        start_notes(
+                            project.id,
+                            NotesRequest(
+                                queue=True,
+                                enrichment=step.enrichment,
+                                include_mermaid=step.include_mermaid,
+                                include_timestamps=step.include_timestamps,
+                            ),
+                            app_state,
+                        )
+                    )
+                elif isinstance(step, FlowCleanupStep):
+                    final_output = remember(
+                        start_cleanup(
+                            project.id,
+                            CleanupRequest(queue=True, **step.model_dump(exclude={"type"})),
+                            app_state,
+                        )
+                    )
+                elif isinstance(step, FlowClipStep):
+                    output = step_output(step)
+                    source = flow_source(step.input_from)
+
+                    def clip_work(bus: EventBus, item=step, path=source, name=output):
+                        media = probe(path, app_state.ffmpeg().ffprobe)
+                        end = min(item.end, media.duration_s)
+                        if end <= item.start:
+                            raise RuntimeError("The Flow clip starts after its selected source ends.")
+                        clips = [
+                            ClipCandidate(
+                                title=item.title,
+                                start=item.start,
+                                end=end,
+                                summary="Flow-selected range",
+                            )
+                        ]
+                        paths = render_selection(
+                            project,
+                            report,
+                            clips,
+                            app_state.settings,
+                            app_state.ffmpeg().ffmpeg,
+                            bus,
+                            combine=True,
+                            reframe=item.reframe,
+                            kind=ArtifactKind.HIGHLIGHT if item.reframe else ArtifactKind.CLIP,
+                            title=item.title,
+                            output_name=name,
+                            source_path=path,
+                            source_has_audio=media.has_audio,
+                        )
+                        return {"files": [written.name for written in paths]}
+
+                    final_output = add_pending(
+                        "clips", f"Clip {step.input_from} → {output}", output, clip_work
+                    )
+                elif isinstance(step, FlowHighlightStep):
+                    output = step_output(step)
+                    llm = app_state.llm(duration_s=report.media.duration_s)
+
+                    def highlight_work(bus: EventBus, item=step, name=output, client=llm):
+                        client.for_task("clips")
+                        try:
+                            result = find_candidates(
+                                report,
+                                app_state.settings,
+                                mode="highlight",
+                                target_seconds=item.target_seconds,
+                                query=item.query.strip(),
+                                count=1,
+                                llm=client,
+                                bus=bus,
+                            )
+                            if not result.candidates:
+                                raise RuntimeError(result.note or "No suitable highlight was found.")
+                            paths = render_selection(
+                                project,
+                                report,
+                                [result.candidates[0]],
+                                app_state.settings,
+                                app_state.ffmpeg().ffmpeg,
+                                bus,
+                                combine=True,
+                                reframe=item.reframe,
+                                kind=ArtifactKind.HIGHLIGHT,
+                                title=result.candidates[0].title,
+                                output_name=name,
+                            )
+                            return {"files": [written.name for written in paths]}
+                        finally:
+                            track_tokens(project, client)
+
+                    final_output = add_pending(
+                        "highlights", f"Finding best highlight → {output}", output, highlight_work
+                    )
+                elif isinstance(step, FlowPromptStep):
+                    output = step_output(step)
+                    source = flow_source(step.input_from)
+
+                    def prompt_work(bus: EventBus, item=step, path=source, name=output):
+                        media = probe(path, app_state.ffmpeg().ffprobe)
+                        try:
+                            program = parse_edit_program(
+                                item.prompt,
+                                media.duration_s,
+                                tuple(str(entry["name"]) for entry in list_media(project)),
+                            )
+                        except ValueError as exc:
+                            raise RuntimeError(str(exc)) from exc
+                        destination = project.output_path(name)
+                        render_program(
+                            path,
+                            destination,
+                            program,
+                            has_audio=media.has_audio,
+                            render=app_state.settings.render,
+                            ffmpeg_bin=app_state.ffmpeg().ffmpeg,
+                            on_progress=lambda fraction: bus.progress("prompt-edit", fraction, "Rendering edit"),
+                        )
+                        project.add_artifact(
+                            ArtifactKind.EDIT,
+                            f"Prompt edit ({format_duration(program.output_duration)})",
+                            destination,
+                            duration_s=program.output_duration,
+                            meta={"operations": "; ".join(program.describe())},
+                        )
+                        return {"file": destination.name, "plan": {"operations": program.describe()}}
+
+                    final_output = add_pending(
+                        "prompt-edit", f"Prompt edit {step.input_from} → {output}", output, prompt_work
+                    )
+                elif isinstance(step, FlowBookendStep):
+                    if step.source == "local":
+                        stored = copy_into_project(
+                            Path(step.local_path).expanduser(), project
+                        )
+                        produced = stored.name
+                    elif step.input_from != "source":
+                        output = step_output(step)
+                        source = flow_source(step.input_from)
+                        style = resolve_style(app_state.state_dir, step.style_id)
+
+                        def derived_bookend_work(
+                            bus: EventBus,
+                            item=step,
+                            path=source,
+                            name=output,
+                            chosen_style=style,
+                        ):
+                            tools = app_state.ffmpeg()
+                            media = probe(path, tools.ffprobe)
+                            analysed_title = report.title or project.meta.title or path.stem
+                            analysed_summary = report.abstract or report.summary or analysed_title
+                            title = item.title.strip() or (
+                                "Thank you for watching" if item.type == "outro" else analysed_title
+                            )
+                            subtitle = item.subtitle.strip() or (
+                                analysed_title if item.type == "outro" else _first_sentence(analysed_summary)
+                            )
+                            end_card = item.final_message.strip() if item.include_final_message else ""
+                            plan = (
+                                plan_outro(
+                                    chosen_style,
+                                    total_seconds=item.duration_seconds,
+                                    source_duration=media.duration_s,
+                                    include_final_message=item.include_final_message,
+                                )
+                                if item.type == "outro"
+                                else plan_intro(
+                                    chosen_style,
+                                    total_seconds=item.duration_seconds,
+                                    shot_count=item.shot_count,
+                                    source_duration=media.duration_s,
+                                    report=None,
+                                    subtitle=subtitle,
+                                )
+                            )
+                            destination = project.output_path(name)
+                            stage = item.type
+                            bus.stage_start(stage, f"Building {chosen_style.name} {item.type}")
+                            with tempfile.TemporaryDirectory(
+                                prefix=f".flow-{item.type}-", dir=project.output_dir
+                            ) as temporary:
+                                soundtrack_source = (
+                                    None
+                                    if item.audio_id == "none"
+                                    else resolve_audio(app_state.state_dir, item.audio_id)
+                                )
+                                soundtrack = prepare_soundtrack(
+                                    item.audio_id,
+                                    plan.total_seconds,
+                                    Path(temporary) / "soundtrack.wav",
+                                    tools.ffmpeg,
+                                    imported=soundtrack_source,
+                                )
+                                render_intro(
+                                    path,
+                                    destination,
+                                    plan,
+                                    style=chosen_style,
+                                    render=app_state.settings.render,
+                                    ffmpeg_bin=tools.ffmpeg,
+                                    soundtrack_path=soundtrack,
+                                    title=title,
+                                    subtitle=subtitle,
+                                    end_card_text=end_card,
+                                    on_progress=lambda fraction: bus.progress(stage, fraction, "Rendering"),
+                                )
+                            project.add_artifact(
+                                ArtifactKind.OUTRO if item.type == "outro" else ArtifactKind.INTRO,
+                                f"{chosen_style.name} {item.type} ({format_duration(plan.total_seconds)})",
+                                destination,
+                                duration_s=plan.total_seconds,
+                                meta={
+                                    "style": chosen_style.id,
+                                    "style_name": chosen_style.name,
+                                    "sequence_kind": item.type,
+                                    "source": item.input_from,
+                                    "audio": item.audio_id,
+                                },
+                            )
+                            bus.stage_end(stage, f"{item.type.capitalize()} ready")
+                            return {"file": destination.name, "plan": plan.describe()}
+
+                        produced = add_pending(
+                            step.type,
+                            f"{step.type.capitalize()} {step.input_from} → {output}",
+                            output,
+                            derived_bookend_work,
+                        )
+                    else:
+                        produced = remember(
+                            start_intro(
+                                project.id,
+                                IntroRequest(
+                                    queue=True,
+                                    duration_seconds=step.duration_seconds,
+                                    shot_count=step.shot_count,
+                                    style_id=step.style_id,
+                                    title=step.title,
+                                    subtitle=step.subtitle,
+                                    audio_id=step.audio_id,
+                                    include_final_message=step.include_final_message,
+                                    end_card_text=step.final_message,
+                                    output_name=step.output_name,
+                                ),
+                                synthetic_request(step.type),
+                                app_state,
+                            )
+                        )
+                    if step.type == "intro":
+                        intro_asset = produced
+                    else:
+                        outro_asset = produced
+                elif isinstance(step, FlowAssembleStep):
+                    final_output = remember(
+                        start_bookend(
+                            project.id,
+                            BookendRequest(
+                                queue=True,
+                                body_filename="" if step.input_from == "source" else step.input_from,
+                                header_asset=intro_asset,
+                                footer_asset=outro_asset,
+                                intro_transition=step.intro_transition,
+                                outro_transition=step.outro_transition,
+                                output_name=step.output_name,
+                            ),
+                            app_state,
+                        )
+                    )
+            if not queued:
+                raise HTTPException(
+                    status_code=400,
+                    detail="This Flow only copies files; add an action or Assemble step.",
+                )
+            started = flush_sequence(app_state, project)
+        except Exception:
+            app_state.sequence.clear(project.id)
+            raise
+
+        return {
+            "flow": flow.model_dump(mode="json"),
+            "queued_steps": queued,
+            "job_ids": started,
+            "final_output": final_output,
+        }
 
     # --- queue -------------------------------------------------------------
     def queue_payload(app_state: UserState, project: Project) -> dict[str, Any]:

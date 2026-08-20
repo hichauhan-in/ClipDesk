@@ -12,13 +12,15 @@ import { createQueue, queuePanel, runOrQueue, withQueued } from "../queue.js";
 import { createAssetImporter } from "./assetimporter.js";
 import { clippingPane as createClippingPane, promptPane as createPromptPane } from "./editorpanes.js";
 import { openExportDialog } from "./exportdialog.js";
-import { createIntroPane } from "./intropane.js";
+import { createIntroPane, createOutroPane } from "./intropane.js";
+import { createFlowsPane } from "./flows.js";
 
 const TABS = [
   ["overview", "Overview"],
   ["transcript", "Transcript & Notes"],
   ["clip", "Cuts and Highlights"],
   ["editor", "Editor"],
+  ["flows", "Flows"],
   ["outputs", "Outputs"],
 ];
 
@@ -135,6 +137,7 @@ export async function renderProject(root, ctx, projectId, params) {
       transcript: () => transcriptTab(project, analysis, jobPanel, ctx, queue),
       clip: () => clipTab(project, analysis, jobPanel, ctx, preset, queue),
       editor: () => editorTab(project, analysis, jobPanel, ctx, goToTab, queue),
+      flows: () => createFlowsPane({ project, analysis, jobPanel, ctx }),
       outputs: () => outputsTab(project, ctx, jobPanel),
     }[activeTab];
     mount(body, view ? view() : h("div.empty", "Nothing here."));
@@ -677,6 +680,41 @@ function transcriptView(project, analysis) {
   search.addEventListener("input", debounce((event) => draw(event.target.value), 180));
   draw();
 
+  async function copyTranscript() {
+    const text = analysis.transcript.segments
+      .map((segment) => {
+        const speaker = segment.speaker ? `${segment.speaker}: ` : "";
+        return `${timecode(segment.start)} ${speaker}${segment.text.trim()}`;
+      })
+      .join("\n");
+    const fallbackCopy = () => {
+      const field = h("textarea", {
+        value: text,
+        readonly: true,
+        style: { position: "fixed", left: "-9999px" },
+      });
+      document.body.append(field);
+      field.select();
+      const copied = document.execCommand("copy");
+      field.remove();
+      if (!copied) throw new Error("Clipboard access was denied");
+    };
+    try {
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          fallbackCopy();
+        }
+      } else {
+        fallbackCopy();
+      }
+      toast(`Full transcript copied (${analysis.transcript.segments.length} segments).`, "ok");
+    } catch (error) {
+      toast(`Could not copy the transcript: ${error.message}`, "err");
+    }
+  }
+
   return h(
     "div.grid",
     { style: { gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)" } },
@@ -689,9 +727,13 @@ function transcriptView(project, analysis) {
       ),
       h("div", { style: { marginTop: "12px" } }, list),
       h(
-        "div.faint.small",
+        "div.row-between",
         { style: { marginTop: "10px" } },
-        "Struck-through lines are what the clean cut would remove. Hover for the reason; click to jump."
+        h(
+          "div.faint.small",
+          "Struck-through lines are what the clean cut would remove. Hover for the reason; click to jump."
+        ),
+        h("button.btn.btn-sm", { type: "button", onclick: copyTranscript }, "Copy transcript")
       )
     ),
     h(
@@ -2002,7 +2044,8 @@ function editorTab(project, analysis, jobPanel, ctx, goToTab, queue) {
     const toolBody = h("div.tool-body");
     const tools = [
       ["prompt", "Prompt edit", () => promptEditPane()],
-      ["intro", "Intro studio", () => introPane()],
+      ["intro", "Intro", () => introPane()],
+      ["outro", "Outro", () => outroPane()],
       ["clipping", "Clipping", () => clippingPane()],
     ];
     const toolTabs = h(
@@ -2085,6 +2128,9 @@ function editorTab(project, analysis, jobPanel, ctx, goToTab, queue) {
   function introPane() {
     return createIntroPane({ project, analysis, jobPanel, ctx, queue });
   }
+  function outroPane() {
+    return createOutroPane({ project, analysis, jobPanel, ctx, queue });
+  }
   draw();
   return container;
 }
@@ -2098,7 +2144,7 @@ const OUTPUT_GROUPS = [
     new Set(["transcript", "notes", "article", "summary"]),
   ],
   ["Cuts", "Clean cuts, clips and highlights", new Set(["clip", "cleanup", "highlight"])],
-  ["Editor", "Intros, prompt edits and assembled cuts", new Set(["intro", "edit", "bookend"])],
+  ["Editor", "Intros, outros, prompt edits and assembled cuts", new Set(["intro", "outro", "edit", "bookend"])],
   ["Exports", "Re-encoded copies", new Set(["export"])],
   ["Bundles", "Zipped selections", new Set(["bundle"])],
 ];

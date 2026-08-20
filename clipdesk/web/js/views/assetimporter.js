@@ -5,7 +5,7 @@ import { debounce, h, mount, toast } from "../dom.js";
 import { bytes } from "../format.js";
 
 const LINK_LABEL = {
-  youtube: "YouTube",
+  youtube: "Video link",
   sharepoint: "SharePoint / Stream",
   onedrive: "OneDrive",
   google_drive: "Google Drive",
@@ -59,7 +59,7 @@ export function createAssetImporter({ projectId, jobPanel, onChanged }) {
 
   const url = h("input", {
     type: "url",
-    placeholder: "Paste a SharePoint, OneDrive, YouTube or direct video link",
+    placeholder: "Paste a SharePoint, Stream or OneDrive link",
   });
   const verdict = h("div.faint.small", { style: { minHeight: "18px" } });
   const results = h("div");

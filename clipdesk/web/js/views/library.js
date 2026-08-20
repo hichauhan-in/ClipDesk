@@ -85,7 +85,7 @@ function creditCell(tokens) {
 }
 
 const LINK_LABEL = {
-  youtube: "YouTube",
+  youtube: "Video link",
   sharepoint: "SharePoint / Stream",
   onedrive: "OneDrive",
   google_drive: "Google Drive",
@@ -382,8 +382,7 @@ function folderIcon() {
 function linkPanel(ctx, jobPanel, onUseOneDrive) {
   const url = h("input", {
     type: "url",
-    placeholder:
-      "Paste a SharePoint, Stream, OneDrive, Google Drive, YouTube or direct video link",
+    placeholder: "Paste a SharePoint, Stream or OneDrive link",
   });
   const title = h("input", { type: "text", placeholder: "Optional — taken from the video if blank" });
   const verdict = h("div.faint.small", { style: { minHeight: "18px" } });
@@ -1034,7 +1033,7 @@ function projectList(projects, ctx) {
               ),
               h("div.faint.small.mono", project.source_filename),
               project.source_url
-                ? h("div.faint.small", { title: project.source_url }, "imported from a link")
+                ? h("div.faint.small", "imported from a link")
                 : null
             ),
             h("td.nowrap", duration(project.duration_s)),

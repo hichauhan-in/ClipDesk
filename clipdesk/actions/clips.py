@@ -540,6 +540,8 @@ def render_selection(
     prefix: str = "clip",
     title: str = "",
     output_name: str = "",
+    source_path: Path | None = None,
+    source_has_audio: bool | None = None,
 ) -> list[Path]:
     """Render the chosen candidates, either as separate files or joined into one."""
     from clipdesk.actions.render import render_clip, render_spans
@@ -547,8 +549,8 @@ def render_selection(
     if not clips:
         raise ValueError("Nothing selected to render.")
 
-    source = project.source_path
-    has_audio = report.media.has_audio
+    source = source_path or project.source_path
+    has_audio = report.media.has_audio if source_has_audio is None else source_has_audio
 
     if combine and len(clips) > 1:
         ordered = sorted(clips, key=lambda clip: clip.start)

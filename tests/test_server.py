@@ -352,6 +352,115 @@ def test_intro_job_uses_the_selected_style_and_words(client, monkeypatch):
     assert unknown.status_code == 400
 
 
+def test_outro_job_uses_title_cards_and_analysis_defaults(client, monkeypatch):
+    from clipdesk.server import app as app_module
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("silent.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    project = state.store.get(project_payload["id"])
+    project.save_analysis(
+        AnalysisReport(
+            project_id=project.id,
+            title="Quarterly platform review",
+            media=MediaInfo(path=str(project.source_path), duration_s=60.0, has_audio=False),
+        )
+    )
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "probe",
+        lambda *args, **kwargs: SimpleNamespace(duration_s=60.0, has_audio=False),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "prepare_soundtrack",
+        lambda _audio, _duration, destination, _ffmpeg, **_kwargs: (
+            destination.write_bytes(b"audio"), destination
+        )[1],
+    )
+    captured = {}
+
+    def fake_render(source, destination, plan, **kwargs):
+        captured.update(kwargs)
+        captured["plan"] = plan
+        destination.write_bytes(b"outro")
+        return destination
+
+    monkeypatch.setattr(app_module, "render_intro", fake_render)
+    response = client.post(
+        f"/api/projects/{project.id}/outro",
+        json={
+            "duration_seconds": 8,
+            "include_final_message": True,
+            "output_name": "closer.mp4",
+        },
+    )
+    job = state.jobs.get(response.json()["job_id"])
+    assert job is not None
+    assert job.finished.wait(2)
+
+    assert job.status == "done"
+    assert captured["title"] == "Thank you for watching"
+    assert captured["subtitle"] == "Quarterly platform review"
+    assert captured["end_card_text"] == "See you next time"
+    assert captured["plan"].shots == ()
+    artifact = state.store.get(project.id).meta.artifacts[-1]
+    assert artifact["kind"] == "outro"
+    assert artifact["filename"] == "closer.mp4"
+
+
+def test_queued_assembly_accepts_bookends_from_earlier_steps(client, monkeypatch):
+    from clipdesk.server import app as app_module
+    from clipdesk.actions.intro import BUILT_IN_STYLES
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("silent.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "probe",
+        lambda *args, **kwargs: SimpleNamespace(duration_s=60.0, has_audio=False),
+    )
+    monkeypatch.setattr(app_module, "resolve_style", lambda *_args: BUILT_IN_STYLES[0])
+
+    for endpoint, output_name in (("intro", "flow-intro.mp4"), ("outro", "flow-outro.mp4")):
+        response = client.post(
+            f"/api/projects/{project_payload['id']}/{endpoint}",
+            json={"queue": True, "output_name": output_name},
+        )
+        assert response.status_code == 200
+
+    response = client.post(
+        f"/api/projects/{project_payload['id']}/bookend",
+        json={
+            "queue": True,
+            "header_asset": "flow-intro.mp4",
+            "footer_asset": "flow-outro.mp4",
+            "output_name": "flow-final.mp4",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["step"]["produces"] == "flow-final.mp4"
+    assert [step["produces"] for step in client.get(
+        f"/api/projects/{project_payload['id']}/queue"
+    ).json()["steps"]] == ["flow-intro.mp4", "flow-outro.mp4", "flow-final.mp4"]
+
+
 def test_short_intro_fits_overview_voiceover_to_total_duration(client, monkeypatch):
     from clipdesk.server import app as app_module
 

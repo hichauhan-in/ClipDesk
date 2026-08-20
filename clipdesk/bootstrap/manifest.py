@@ -139,7 +139,7 @@ def _ytdlp_component() -> Component:
         key="ytdlp",
         label="Media extractor",
         description="Downloads recordings from links that are not a plain file URL — "
-        "SharePoint, Stream, YouTube, Vimeo, Panopto.",
+        "SharePoint, Stream and OneDrive.",
         target_dir="ytdlp",
         required_files=("yt-dlp.pyz",),
         sources=(

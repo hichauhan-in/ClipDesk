@@ -382,8 +382,8 @@ def _ytdlp_error(tail: list[str], link: Link, browser_cookies: str) -> str:
     # cookies for a problem cookies cannot fix.
     if "javascript runtime" in lowered or "challenge solving failed" in lowered:
         return (
-            "This video needs a JavaScript runtime that is not installed. YouTube "
-            "signs its downloads with a challenge that only runs as JavaScript, and "
+            "This video needs a JavaScript runtime that is not installed. Its provider "
+            "signs downloads with a challenge that only runs as JavaScript, and "
             "without one the extractor is refused with a 403 that looks like a "
             "sign-in problem.\n\n"
             "Install Node.js from https://nodejs.org and try again — ClipDesk picks "
@@ -394,7 +394,7 @@ def _ytdlp_error(tail: list[str], link: Link, browser_cookies: str) -> str:
         if not js_runtime_available():
             return (
                 "The download was refused, and no JavaScript runtime is installed. "
-                "YouTube signs its downloads with a challenge that only runs as "
+                "This provider signs downloads with a challenge that only runs as "
                 "JavaScript, so that is the likely cause rather than sign-in.\n\n"
                 "Install Node.js from https://nodejs.org and try again. If it still "
                 "fails, use \"Paste a signed-in session\".\n\n"

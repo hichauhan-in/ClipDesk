@@ -273,12 +273,12 @@ def concat_normalised(
     labels: list[str] = []
     for index, item in enumerate(inputs):
         stop = "" if item.end is None else f":end={item.end:.3f}"
-        video_trim = (
-            f"trim=start={item.start:.3f}{stop},setpts=PTS-STARTPTS," if item.trimmed else ""
-        )
+        video_trim = f"trim=start={item.start:.3f}{stop},setpts=PTS-STARTPTS,"
         parts.append(
             f"[{index}:v]{video_trim}scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"tpad=stop_mode=clone:stop_duration={item.effective_duration:.3f},"
+            f"trim=duration={item.effective_duration:.3f},"
             f"setsar=1,fps={fps},format=yuv420p[v{index}];"
         )
         if item.has_audio:

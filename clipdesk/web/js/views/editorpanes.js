@@ -43,16 +43,49 @@ export function clippingPane({ project, state, videoOutputs, jobPanel, ctx, queu
       )
     );
 
-  const mediaOptions = (onchange) =>
-    h(
-      "select",
-      { onchange },
-      h("option", { value: "" }, "None"),
-      state.assets.map((asset) => h("option", { value: asset.name }, asset.name))
-    );
+  // Anything this project can attach: what was imported, plus what it has
+  // rendered itself. An intro built with the Intro tool is an output, not an import,
+  // so listing only imports meant a project could not attach its own intro.
+  function attachmentLabel(artifact) {
+    const legacyStyle = artifact.meta?.style?.replaceAll("-", " ") || "";
+    const style = artifact.meta?.style_name
+      || (legacyStyle ? legacyStyle[0].toUpperCase() + legacyStyle.slice(1) : "")
+      || artifact.label;
+    const length = artifact.duration_s ? timecode(artifact.duration_s) : "";
+    return `${artifact.filename} (${style}${length ? ` · ${length}` : ""})`;
+  }
 
-  const headerSelect = mediaOptions((event) => (selection.header = event.target.value));
-  const footerSelect = mediaOptions((event) => (selection.footer = event.target.value));
+  function attachable(kind) {
+    const imported = state.assets.map((asset) => [asset.name, asset.name]);
+    const rendered = videoOutputs
+      .filter((artifact) => artifact.kind === kind)
+      .map((artifact) => [artifact.filename, attachmentLabel(artifact)]);
+    const seen = new Set(imported.map(([value]) => value));
+    return [...imported, ...rendered.filter(([value]) => !seen.has(value))];
+  }
+
+  const mediaOptions = (kind, onchange) => {
+    const select = h("select", { onchange });
+    const draw = () => {
+      const current = select.value;
+      mount(
+        select,
+        h("option", { value: "" }, "None"),
+        // Queued files are offered too, so an intro can be attached in the same
+        // batch that renders it rather than needing a second pass.
+        (queue ? withQueued(attachable(kind), queue) : attachable(kind)).map(([value, label]) =>
+          h("option", { value, selected: value === current }, label)
+        )
+      );
+      select.value = current;
+    };
+    draw();
+    queue?.subscribe(draw);
+    return select;
+  };
+
+  const headerSelect = mediaOptions("intro", (event) => (selection.header = event.target.value));
+  const footerSelect = mediaOptions("outro", (event) => (selection.footer = event.target.value));
   const bodySelect = h("select", {
     onchange: (event) => (selection.body = event.target.value),
   });
@@ -108,9 +141,9 @@ export function clippingPane({ project, state, videoOutputs, jobPanel, ctx, queu
         h("label.field", h("span", "Outro"), footerSelect),
         h("label.field", h("span", "Outro transition"), transitionSelect("outroTransition"))
       ),
-      state.assets.length
+      state.assets.length || videoOutputs.length
         ? null
-        : h("div.faint.small", "Import media above to attach an intro or outro.")
+        : h("div.faint.small", "Import media above, or render something, to attach an intro or outro.")
     ),
     h("label.field", h("span", "Save as"), outputName),
     runOrQueue({

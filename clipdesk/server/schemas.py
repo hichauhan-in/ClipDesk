@@ -138,12 +138,13 @@ class IntroRequest(Queueable):
     title: str = Field(default="", max_length=120)
     subtitle: str = Field(default="", max_length=200)
     end_card_text: str = Field(default="", max_length=120)
+    include_final_message: bool = False
     show_shot_tags: bool = True
     repeat_title: bool = False
     voiceover: bool = False
     voiceover_text: str = Field(default="", max_length=1200)
     voice_id: str = Field(default="", max_length=180)
-    audio_id: str = Field(default="cinematic", max_length=220)
+    audio_id: str = Field(default="elevate", max_length=220)
     output_name: str = "intro.mp4"
 
 

@@ -1,4 +1,4 @@
-// The Intro studio: pick a look, set the words, hear the bed, build the opener.
+// The Intro/Outro studio: pick a look, set the words, hear the bed, build a bookend.
 //
 // The preview is CSS rather than a rendered sample. Encoding a real preview for
 // every click would cost seconds each time; a looping mock of the same motion
@@ -53,24 +53,47 @@ function stylePreview(style) {
   return node;
 }
 
-export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
+export function createIntroPane({ project, analysis, jobPanel, ctx, queue, kind = "intro" }) {
   const pane = h("div.stack.editor-tool-pane");
+  const isOutro = kind === "outro";
+  const kindTitle = isOutro ? "Outro" : "Intro";
 
   const analysedTitle = analysis?.title || project.title || project.source_filename || "Overview";
   const overview = analysis?.abstract || analysis?.summary || "";
   const firstSentence = (overview.split(/(?<=[.!?])\s+/)[0] || "").slice(0, 150);
 
-  const duration = numberField({ value: 14, min: 5, max: 60, step: 1 });
+  const duration = numberField({ value: isOutro ? 8 : 14, min: 5, max: 60, step: 1 });
   const shots = numberField({ value: 5, min: 2, max: 12 });
-  const outputName = h("input", { type: "text", value: "intro.mp4" });
+  const outputName = h("input", { type: "text", value: `${kind}.mp4` });
 
-  const titleInput = h("input", { type: "text", maxlength: 120, value: analysedTitle });
-  const subtitleInput = h("input", { type: "text", maxlength: 200, value: firstSentence });
+  const titleInput = h("input", {
+    type: "text",
+    maxlength: 120,
+    value: isOutro ? "Thank you for watching" : analysedTitle,
+  });
+  const subtitleInput = h("input", {
+    type: "text",
+    maxlength: 200,
+    value: isOutro ? analysedTitle : firstSentence,
+  });
   const endCardInput = h("input", {
     type: "text",
     maxlength: 120,
     placeholder: "Blank uses the title",
+    value: isOutro ? "See you next time" : "",
+    disabled: isOutro,
   });
+  const includeFinalMessage = h("input", { type: "checkbox" });
+  const finalMessageField = h(
+    "label.field",
+    { class: isOutro ? "disabled-field" : "" },
+    h("span", isOutro ? "Final message" : "End card"),
+    endCardInput
+  );
+  includeFinalMessage.onchange = () => {
+    endCardInput.disabled = !includeFinalMessage.checked;
+    finalMessageField.classList.toggle("disabled-field", !includeFinalMessage.checked);
+  };
   const shotTags = h("input", { type: "checkbox", checked: true });
   const repeatTitle = h("input", { type: "checkbox" });
 
@@ -83,8 +106,8 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
   const narration = h("textarea", {
     rows: 2,
     disabled: true,
-    value: firstSentence || analysedTitle,
-    placeholder: "Spoken over the intro",
+    value: isOutro ? `Thank you for watching ${analysedTitle}.` : firstSentence || analysedTitle,
+    placeholder: `Spoken over the ${kind}`,
   });
   voiceover.onchange = () => {
     narration.disabled = !voiceover.checked;
@@ -122,6 +145,23 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
   const catalogHost = h("div", { style: { display: "none" } });
   const styleStatus = h("div.faint.small");
 
+  const wordingSelect = h(
+    "select",
+    h("option", { value: "classic" }, "Thank you for watching"),
+    h("option", { value: "appreciation" }, "Thanks for your time"),
+    h("option", { value: "conversation" }, "Keep the conversation going"),
+    h("option", { value: "simple" }, "Simple sign-off")
+  );
+  const wordings = {
+    classic: ["Thank you for watching", analysedTitle, "See you next time"],
+    appreciation: ["Thanks for your time", `You watched ${analysedTitle}`, "Until next time"],
+    conversation: ["Keep the conversation going", `Thanks for joining ${analysedTitle}`, "Share what you think"],
+    simple: ["Thanks for watching", "", ""],
+  };
+  wordingSelect.onchange = () => {
+    [titleInput.value, subtitleInput.value, endCardInput.value] = wordings[wordingSelect.value];
+  };
+
   let payload = { installed: [], catalog: [], voices: [] };
   let selectedId = "prestige";
 
@@ -157,7 +197,7 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
         h("option", { value: item.id, selected: item.id === selectedId }, item.name)
       )
     );
-    styleDetail.textContent = style ? style.description : "Choose an intro style.";
+    styleDetail.textContent = style ? style.description : `Choose an ${kind} style.`;
     mount(
       styleTraits,
       style
@@ -183,7 +223,7 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
             "div.intro-catalog",
             h(
               "div.row-between",
-              h("strong.small", "More intro styles"),
+              h("strong.small", `More ${kind} styles`),
               h(
                 "button.btn.btn-sm.btn-ghost",
                 { onclick: () => (catalogHost.style.display = "none") },
@@ -259,12 +299,16 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
     try {
       const library = await api.introAudio();
       audioPicker.draw([
-        { label: "Built-in soundtracks", items: library.built_in },
+        {
+          label: "Soundtrack",
+          items: [{ id: "none", name: "None", description: "No soundtrack.", previewable: false }],
+        },
         ...(library.imported.length
-          ? [{ label: "Imported audio", items: library.imported }]
+          ? [{ label: "Saved presets", items: library.imported }]
           : []),
+        { label: "Built-in soundtracks", items: library.built_in },
       ]);
-      audioPicker.value = selectedAudio || audioPicker.value || "cinematic";
+      audioPicker.value = selectedAudio || audioPicker.value || "elevate";
     } catch (error) {
       audioStatus.textContent = error.message;
     }
@@ -274,15 +318,18 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
     pane,
     h(
       "p.muted.small",
-      analysis
-        ? "An intro is built as a sequence: a cold open, a title reveal, a rhythm of " +
-          "your highest-value moments, then an end card. Source audio is never used."
-        : "An intro is built as a sequence: a cold open, a title reveal, a rhythm of " +
-          "moments sampled across the video, then an end card. No transcript required."
+      isOutro
+        ? "Build a polished closing card from the analysis. It uses no video moments: " +
+          "only animated words, a final message, and an optional blurred still backdrop."
+        : analysis
+          ? "An intro is built as a sequence: a cold open, a title reveal, a rhythm of " +
+            "your highest-value moments, then an end card. Source audio is never used."
+          : "An intro is built as a sequence: a cold open, a title reveal, a rhythm of " +
+            "moments sampled across the video, then an end card. No transcript required."
     ),
     h(
       "div.intro-style-row",
-      h("label.field", h("span", "Intro style"), styleSelect),
+      h("label.field", h("span", `${kindTitle} style`), styleSelect),
       h(
         "div.row",
         h(
@@ -311,18 +358,23 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
         h(
           "div.field-grid",
           h("label.field", h("span", "Length (seconds)"), duration),
-          h("label.field", h("span", "Moments to feature"), shots)
+          isOutro
+            ? h("label.field", h("span", "Wording preset"), wordingSelect)
+            : h("label.field", h("span", "Moments to feature"), shots)
         ),
         h(
           "div.intro-columns",
           h(
             "section.pane-group",
             h("legend", "Words"),
-            h("label.field", h("span", "Title"), titleInput),
-            h("label.field", h("span", "Subtitle"), subtitleInput),
-            h("label.field", h("span", "End card"), endCardInput),
-            h("label.check", shotTags, "Label moments with their chapter"),
-            h("label.check", repeatTitle, "Repeat the title over the first moment")
+            h("label.field", h("span", isOutro ? "Thank-you line" : "Title"), titleInput),
+            h("label.field", h("span", isOutro ? "Supporting line" : "Subtitle"), subtitleInput),
+            isOutro
+              ? h("label.check", includeFinalMessage, "Add a final message")
+              : null,
+            finalMessageField,
+            isOutro ? null : h("label.check", shotTags, "Label moments with their chapter"),
+            isOutro ? null : h("label.check", repeatTitle, "Repeat the title over the first moment")
           ),
           h(
             "section.pane-group",
@@ -384,21 +436,21 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
       "div.intro-footer",
       h("label.field", h("span", "Save as"), outputName),
       runOrQueue({
-        label: "Build intro",
+        label: `Build ${kind}`,
         onRun: () =>
-          jobPanel.run(api.intro(project.id, introBody()), {
-            title: "Building the intro",
+          jobPanel.run(api[kind](project.id, sequenceBody()), {
+            title: `Building the ${kind}`,
             onDone: () => {
-              toast("Intro ready — see Outputs.", "ok");
+              toast(`${kindTitle} ready — see Outputs.`, "ok");
               ctx.refresh();
             },
           }),
-        onQueue: () => queue.add((body) => api.intro(project.id, body), introBody()),
+        onQueue: () => queue.add((body) => api[kind](project.id, body), sequenceBody()),
       })
     )
   );
 
-  function introBody() {
+  function sequenceBody() {
     return {
       duration_seconds: duration.value,
       shot_count: shots.value,
@@ -406,17 +458,22 @@ export function createIntroPane({ project, analysis, jobPanel, ctx, queue }) {
       title: titleInput.value.trim(),
       subtitle: subtitleInput.value.trim(),
       end_card_text: endCardInput.value.trim(),
+      include_final_message: isOutro ? includeFinalMessage.checked : true,
       show_shot_tags: shotTags.checked,
       repeat_title: repeatTitle.checked,
       voiceover: voiceover.checked,
       voiceover_text: narration.value.trim(),
       voice_id: voiceSelect.value,
-      audio_id: audioPicker.value || "cinematic",
-      output_name: outputName.value || "intro.mp4",
+      audio_id: audioPicker.value || "elevate",
+      output_name: outputName.value || `${kind}.mp4`,
     };
   }
 
   loadStyles();
   loadAudio();
   return pane;
+}
+
+export function createOutroPane(options) {
+  return createIntroPane({ ...options, kind: "outro" });
 }

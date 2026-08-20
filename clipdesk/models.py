@@ -216,6 +216,7 @@ class ArtifactKind(str, Enum):
     CLEANUP = "cleanup"
     HIGHLIGHT = "highlight"
     INTRO = "intro"
+    OUTRO = "outro"
     EDIT = "edit"
     BOOKEND = "bookend"
     EXPORT = "export"
