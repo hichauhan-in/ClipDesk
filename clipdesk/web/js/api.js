@@ -9,7 +9,7 @@ class ApiError extends Error {
 }
 
 async function request(path, { method = "GET", body, signal } = {}) {
-  const init = { method, signal, headers: {} };
+  const init = { method, signal, headers: {}, cache: "no-store" };
   if (body instanceof FormData) {
     init.body = body;
   } else if (body !== undefined) {
@@ -56,6 +56,8 @@ export const api = {
 
   listProjects: () => request("/api/projects"),  getProject: (id) => request(`/api/projects/${id}`),
   deleteProject: (id) => request(`/api/projects/${id}`, { method: "DELETE" }),
+  renameProject: (id, title) =>
+    request(`/api/projects/${id}/rename`, { method: "POST", body: { title } }),
   getAnalysis: (id) => request(`/api/projects/${id}/analysis`),
   transcriptCheckpoint: (id) => request(`/api/projects/${id}/transcript/checkpoint`),
 

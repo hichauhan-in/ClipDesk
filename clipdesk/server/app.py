@@ -220,6 +220,7 @@ from clipdesk.server.schemas import (
     MediaAdoptRequest,
     NotesRequest,
     OutputRenameRequest,
+    ProjectRenameRequest,
     OutputSelection,
     PromptEditRequest,
     ProvisionRequest,
@@ -591,6 +592,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["referrer-policy"] = "no-referrer"
         response.headers["x-frame-options"] = "DENY"
         response.headers["permissions-policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.url.path.startswith("/api/"):
+            response.headers["cache-control"] = "no-store"
         if request.url.path not in {"/api/docs", "/api/openapi.json"}:
             response.headers["content-security-policy"] = (
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -728,6 +731,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         batch_index: int | None = None,
     ):
         app_state.ffmpeg()
+        existing = next(
+            (
+                item
+                for item in app_state.jobs.list(project.id, active_only=True)
+                if item.get("kind") == "analyze"
+            ),
+            None,
+        )
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Analysis is already queued or running for this recording.",
+            )
 
         def work(bus: EventBus) -> dict[str, Any]:
             target = app_state.store.require(project.id)
@@ -1798,6 +1814,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Wait for the project's active job to finish before deleting it.",
             )
         return {"deleted": app_state.store.delete(project_id)}
+
+    @app.post("/api/projects/{project_id}/rename")
+    def rename_project(
+        project_id: str,
+        request: ProjectRenameRequest,
+        app_state: UserState = Depends(current),
+    ) -> dict[str, Any]:
+        project = require_project(project_id, app_state)
+        try:
+            title = project.rename(request.title)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"id": project.id, "title": title}
 
     @app.get("/api/projects/{project_id}/analysis")
     def get_analysis(

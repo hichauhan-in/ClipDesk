@@ -28,6 +28,10 @@ const POWER =
   "M7.25 1.75a.75.75 0 0 1 1.5 0v5a.75.75 0 0 1-1.5 0v-5ZM4.18 3.27a.75.75 0 0 1 .16 1.05A5 5 0 1 0 " +
   "11.66 4.32a.75.75 0 1 1 .9-1.2A6.5 6.5 0 1 1 3.12 3.1a.75.75 0 0 1 1.05.16Z";
 
+const PENCIL =
+  "M11.7 1.8a1.75 1.75 0 0 1 2.48 2.48l-8.5 8.5a.75.75 0 0 1-.32.19l-3.2.8a.75.75 0 0 1-.91-.91l.8-3.2a.75.75 0 0 1 .19-.32l8.5-8.5Zm1.42 1.42a.25.25 0 0 0-.36 0l-1.05 1.05 1.02 1.02 1.05-1.05a.25.25 0 0 0 0-.36l-.66-.66ZM11.67 6.35l-1.02-1.02-7.2 7.2 1.39-.35 6.83-6.83Z";
+
 export const binIcon = (options) => icon(BIN, options);
 export const linkIcon = (options) => icon(LINK, options);
 export const powerIcon = (options) => icon(POWER, options);
+export const pencilIcon = (options) => icon(PENCIL, options);

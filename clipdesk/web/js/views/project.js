@@ -76,6 +76,10 @@ export async function renderProject(root, ctx, projectId, params) {
   if (project.status === "ready") {
     analysis = await api.getAnalysis(projectId).catch(() => null);
   }
+  const initialJobs = await api.listJobs(projectId).catch(() => ({ jobs: [] }));
+  const activeAnalysisJob = (initialJobs.jobs || []).find(
+    (job) => job.kind === "analyze" && (job.status === "queued" || job.status === "running")
+  ) || null;
 
   const jobPanel = createJobPanel();
   const queue = createQueue(projectId);
@@ -133,7 +137,7 @@ export async function renderProject(root, ctx, projectId, params) {
     pendingPreset = null;
 
     const view = {
-      overview: () => overviewTab(project, analysis, jobPanel, ctx),
+      overview: () => overviewTab(project, analysis, jobPanel, ctx, activeAnalysisJob),
       transcript: () => transcriptTab(project, analysis, jobPanel, ctx, queue),
       clip: () => clipTab(project, analysis, jobPanel, ctx, preset, queue),
       editor: () => editorTab(project, analysis, jobPanel, ctx, goToTab, queue),
@@ -156,13 +160,17 @@ export async function renderProject(root, ctx, projectId, params) {
   queue.refresh();
   restoreActiveProjectJob();
 
-  if (params.get("autostart") === "1" && project.status !== "ready") {
+  if (
+    params.get("autostart") === "1" &&
+    project.status !== "ready" &&
+    !activeAnalysisJob
+  ) {
     startAnalysis(project, jobPanel, ctx);
   }
 
   async function restoreActiveProjectJob() {
     try {
-      const payload = await api.listJobs(project.id);
+      const payload = initialJobs;
       if (ctx.isCurrent?.() === false || jobPanel.busy) return;
       const active = (payload.jobs || []).find(
         (job) => job.status === "queued" || job.status === "running"
@@ -261,14 +269,18 @@ function jumpTo(seconds) {
 }
 
 // --- overview ----------------------------------------------------------------
-function overviewTab(project, analysis, jobPanel, ctx) {
+function overviewTab(project, analysis, jobPanel, ctx, activeAnalysisJob = null) {
   if (!analysis) {
     return h(
       "div.card",
       h("h2", "Not analysed yet"),
       h(
         "p.muted",
-        project.status === "failed"
+        activeAnalysisJob
+          ? activeAnalysisJob.status === "queued"
+            ? "Analysis is queued and will start when the current media job finishes."
+            : "Analysis is running. Progress and cancellation controls are shown above."
+          : project.status === "failed"
           ? `The last attempt failed: ${project.error}`
           : project.status === "transcribed"
             ? "The transcript is ready and can be copied from the badge above. Continue to build chapters, cleanup decisions, highlights and summaries without transcribing again."
@@ -279,16 +291,37 @@ function overviewTab(project, analysis, jobPanel, ctx) {
         "div.row",
         h(
           "button.btn.btn-primary",
-          { onclick: () => startAnalysis(project, jobPanel, ctx) },
-          project.status === "transcribed" ? "Continue analysis" : "Analyse"
+          {
+            disabled: Boolean(activeAnalysisJob),
+            onclick: () => startAnalysis(project, jobPanel, ctx),
+          },
+          activeAnalysisJob
+            ? activeAnalysisJob.status === "queued" ? "Analysis queued" : "Analysing…"
+            : project.status === "transcribed" ? "Continue analysis" : "Analyse"
         ),
         h(
           "button.btn",
           {
-            onclick: () => startAnalysis(project, jobPanel, ctx, { skip_llm: true }),
-            title: "Transcript and silence only — no language model",
+            onclick: async () => {
+              if (activeAnalysisJob) {
+                const result = await api.cancelJob(activeAnalysisJob.id);
+                if (!result.cancelled) {
+                  toast("The active analysis could not be switched.", "err");
+                  return;
+                }
+                for (let attempt = 0; attempt < 120; attempt += 1) {
+                  const job = await api.getJob(activeAnalysisJob.id);
+                  if (!["queued", "running"].includes(job.status)) break;
+                  await new Promise((resolve) => setTimeout(resolve, 250));
+                }
+              }
+              startAnalysis(project, jobPanel, ctx, { skip_llm: true });
+            },
+            title: activeAnalysisJob
+              ? "Cancel the current analysis and continue with transcript and silence only"
+              : "Transcript and silence only — no language model",
           },
-          "Transcript only"
+          activeAnalysisJob ? "Switch to transcript only" : "Transcript only"
         )
       )
     );
@@ -401,11 +434,23 @@ function overviewTab(project, analysis, jobPanel, ctx) {
       h(
         "div.card",
         h("h3", "Re-run"),
-        h("p.muted.small", "Re-analyse if you changed the model or the transcript."),
+        h(
+          "p.muted.small",
+          activeAnalysisJob
+            ? activeAnalysisJob.status === "queued"
+              ? "Re-analysis is already queued."
+              : "Re-analysis is currently running."
+            : "Re-analyse if you changed the model or the transcript."
+        ),
         h(
           "button.btn.btn-sm",
-          { onclick: () => startAnalysis(project, jobPanel, ctx) },
-          "Analyse again"
+          {
+            disabled: Boolean(activeAnalysisJob),
+            onclick: () => startAnalysis(project, jobPanel, ctx),
+          },
+          activeAnalysisJob
+            ? activeAnalysisJob.status === "queued" ? "Analysis queued" : "Analysing…"
+            : "Analyse again"
         )
       ),
       askCard(project)

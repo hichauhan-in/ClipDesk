@@ -253,6 +253,18 @@ class Project:
             self.meta.error = error
             self._save_locked()
 
+    def rename(self, title: str) -> str:
+        clean = " ".join(title.split()).strip()
+        if not clean:
+            raise ValueError("Project title cannot be blank.")
+        if len(clean) > 180:
+            raise ValueError("Project title must be 180 characters or fewer.")
+        with self._lock:
+            self._refresh_meta_locked()
+            self.meta.title = clean
+            self._save_locked()
+        return clean
+
     # --- artifacts ---------------------------------------------------------
     def add_artifact(
         self,

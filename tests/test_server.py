@@ -743,6 +743,46 @@ def test_cancelling_after_transcription_keeps_the_checkpoint(client, monkeypatch
     ).text
 
 
+def test_duplicate_analysis_is_rejected_while_one_is_running(client, monkeypatch):
+    from clipdesk.server import app as app_module
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("meeting.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    started = threading.Event()
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+
+    def fake_analyze(_project, _settings, bus, **_kwargs):
+        started.set()
+        while True:
+            bus.progress("analysis", None, "Working")
+            threading.Event().wait(0.01)
+
+    monkeypatch.setattr(app_module, "analyze_project", fake_analyze)
+    first = client.post(
+        f"/api/projects/{project_payload['id']}/analyze",
+        json={"skip_llm": True},
+    )
+    assert first.status_code == 200
+    assert started.wait(2)
+
+    duplicate = client.post(
+        f"/api/projects/{project_payload['id']}/analyze",
+        json={"skip_llm": True},
+    )
+
+    assert duplicate.status_code == 409
+    assert "already queued or running" in duplicate.json()["detail"]
+    client.post(f"/api/jobs/{first.json()['job_id']}/cancel")
+    assert state.jobs.get(first.json()["job_id"]).finished.wait(2)
+
+
 def test_output_can_be_renamed_through_the_api(client):
     project_payload = client.post(
         "/api/projects",
@@ -766,6 +806,43 @@ def test_output_can_be_renamed_through_the_api(client):
     assert any(
         item["filename"] == "meeting-transcript.md" for item in refreshed["artifacts"]
     )
+
+
+def test_project_title_can_be_renamed_without_changing_identity(client):
+    project = client.post(
+        "/api/projects",
+        files={"video": ("meeting.mp4", b"video", "video/mp4")},
+    ).json()
+
+    response = client.post(
+        f"/api/projects/{project['id']}/rename",
+        json={"title": "  Weekly engineering review  "},
+    )
+    reloaded = client.get(f"/api/projects/{project['id']}").json()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": project["id"],
+        "title": "Weekly engineering review",
+    }
+    assert reloaded["id"] == project["id"]
+    assert reloaded["source_filename"] == "meeting.mp4"
+    assert reloaded["title"] == "Weekly engineering review"
+
+
+def test_project_title_cannot_be_blank(client):
+    project = client.post(
+        "/api/projects",
+        files={"video": ("meeting.mp4", b"video", "video/mp4")},
+    ).json()
+
+    response = client.post(
+        f"/api/projects/{project['id']}/rename",
+        json={"title": "   "},
+    )
+
+    assert response.status_code in {400, 422}
+    assert client.get(f"/api/projects/{project['id']}").json()["title"] == "meeting"
 
 
 # --- the queue ---------------------------------------------------------------

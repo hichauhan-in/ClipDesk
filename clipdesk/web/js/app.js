@@ -3,7 +3,7 @@
 import { api } from "./api.js";
 import { resetBridgeAlert, updateBridgeAlert } from "./bridgealert.js";
 import { confirmAction, h, loadingView, mount, toast } from "./dom.js";
-import { binIcon, powerIcon } from "./icons.js";
+import { binIcon, pencilIcon, powerIcon } from "./icons.js";
 import { onJobSettled, startJobStore } from "./jobs.js";
 import { createGlobalJobsBadge } from "./jobschip.js";
 import { createNotificationCentre } from "./notificationcentre.js";
@@ -127,13 +127,25 @@ async function drawNav(parts, generation = routeGeneration) {
     projects.slice(0, 10).map((project) => {
       const current = parts[0] === "project" && parts[1] === project.id;
       const name = project.title || project.source_filename;
-      return h(
+      const row = h(
         "div.nav-row",
         { "aria-current": String(current) },
         h(
           "button.nav-item",
           { title: name, onclick: () => ctx.navigate(`#/project/${project.id}`) },
           h("span", name)
+        ),
+        h(
+          "button.nav-edit",
+          {
+            title: `Rename ${name}`,
+            "aria-label": `Rename ${name}`,
+            onclick: (event) => {
+              event.stopPropagation();
+              beginRename();
+            },
+          },
+          pencilIcon()
         ),
         h(
           "button.nav-del",
@@ -156,6 +168,49 @@ async function drawNav(parts, generation = routeGeneration) {
           binIcon()
         )
       );
+
+      function beginRename() {
+        const input = h("input.nav-rename-input", {
+          type: "text",
+          value: name,
+          maxlength: 180,
+          "aria-label": `New title for ${name}`,
+        });
+        let closing = false;
+        const finish = async (save) => {
+          if (closing) return;
+          closing = true;
+          const title = input.value.trim();
+          if (!save) {
+            drawNav(parts);
+            return;
+          }
+          if (!title) {
+            closing = false;
+            toast("Project title cannot be blank.", "err");
+            input.focus();
+            return;
+          }
+          try {
+            await api.renameProject(project.id, title);
+            toast(`Renamed to ${title}.`, "ok");
+            ctx.refresh();
+          } catch (error) {
+            closing = false;
+            toast(error.message, "err");
+            input.focus();
+          }
+        };
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") finish(true);
+          if (event.key === "Escape") finish(false);
+        });
+        input.addEventListener("blur", () => finish(true));
+        mount(row, input);
+        input.focus();
+        input.select();
+      }
+      return row;
     })
   );
 }

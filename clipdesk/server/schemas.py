@@ -117,6 +117,10 @@ class OutputRenameRequest(BaseModel):
     name: str = Field(min_length=1, max_length=180)
 
 
+class ProjectRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+
+
 class BookendRequest(Queueable):
     #: A file in the project's output folder, or "" to wrap the original upload.
     body_filename: str = ""
