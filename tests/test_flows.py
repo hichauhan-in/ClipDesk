@@ -408,3 +408,100 @@ def test_best_highlight_step_selects_and_renders_top_candidate(client, monkeypat
     assert job.finished.wait(2)
     assert job.status == "done", job.error
     assert project.output_path("best.mp4").read_bytes() == b"highlight"
+
+
+def test_flow_saves_multiple_generated_files_to_a_destination(client, monkeypatch, tmp_path):
+    from clipdesk.server import app as app_module
+
+    project_id, _project = analysed_project(client)
+    state = client.app.state.clipdesk.authenticate({})
+    destination = tmp_path / "OneDrive - Organization" / "Published"
+    destination.mkdir(parents=True)
+    (destination / "clean.mp4").write_bytes(b"existing")
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "probe",
+        lambda *args, **kwargs: SimpleNamespace(duration_s=8.0, has_audio=True),
+    )
+
+    def fake_cleanup(project_arg, _report, _settings, _options, _ffmpeg, _bus, output_name):
+        path = project_arg.output_path(output_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"clean")
+        return path
+
+    def fake_soundtrack(_audio, _duration, path, _ffmpeg, **_kwargs):
+        path.write_bytes(b"audio")
+        return path
+
+    def fake_intro(_source, path, _plan, **_kwargs):
+        path.write_bytes(b"intro")
+        return path
+
+    monkeypatch.setattr(app_module, "render_cleanup", fake_cleanup)
+    monkeypatch.setattr(app_module, "prepare_soundtrack", fake_soundtrack)
+    monkeypatch.setattr(app_module, "render_intro", fake_intro)
+    flow = {
+        "id": "save-many",
+        "name": "Save many",
+        "steps": [
+            {"type": "cleanup", "output_name": "clean.mp4"},
+            {
+                "type": "intro",
+                "input_from": "clean.mp4",
+                "audio_id": "none",
+                "output_name": "intro.mp4",
+            },
+            {
+                "type": "save",
+                "files": ["clean.mp4", "intro.mp4"],
+                "destination": str(destination),
+            },
+        ],
+    }
+    assert client.put("/api/flows/save-many", json=flow).status_code == 200
+
+    response = client.post(f"/api/projects/{project_id}/flows/save-many/run")
+
+    assert response.status_code == 200, response.text
+    jobs = [state.jobs.get(job_id) for job_id in response.json()["job_ids"]]
+    for job in jobs:
+        assert job.finished.wait(2)
+        assert job.status == "done", job.error
+    assert (destination / "clean.mp4").read_bytes() == b"existing"
+    assert (destination / "clean-2.mp4").read_bytes() == b"clean"
+    assert (destination / "intro.mp4").read_bytes() == b"intro"
+    assert jobs[-1].result["destination"] == str(destination)
+
+
+@pytest.mark.parametrize(
+    "save_step, message",
+    [
+        (
+            {"type": "save", "files": ["missing.mp4"], "destination": "C:\\Published"},
+            "must be produced by an earlier step",
+        ),
+        (
+            {"type": "save", "files": ["clean.mp4"], "destination": "relative/folder"},
+            "absolute folder path",
+        ),
+    ],
+)
+def test_flow_save_step_validates_sources_and_destination(client, save_step, message):
+    project_id, _project = analysed_project(client)
+    steps = []
+    if save_step["files"] == ["clean.mp4"]:
+        steps.append({"type": "cleanup", "output_name": "clean.mp4"})
+    steps.append(save_step)
+    flow = {"id": "invalid-save", "name": "Invalid save", "steps": steps}
+    assert client.put("/api/flows/invalid-save", json=flow).status_code == 200
+
+    response = client.post(f"/api/projects/{project_id}/flows/invalid-save/run")
+
+    assert response.status_code == 400
+    assert message in response.json()["detail"]

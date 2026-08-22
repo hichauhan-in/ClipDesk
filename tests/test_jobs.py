@@ -183,16 +183,21 @@ def test_a_queued_job_can_be_cancelled():
     assert ran == []
 
 
-def test_a_running_job_is_not_cancelled():
-    # Stopping ffmpeg midway leaves a half-written file, so the honest answer is
-    # that it has to finish.
+def test_a_running_job_is_cancelled_cooperatively():
     manager = JobManager(lanes={"media": 1})
-    release = threading.Event()
-    job = manager.start("analyze", "p", lambda _bus: release.wait(3) or {})
+
+    def work(bus):
+        while True:
+            bus.progress("analysis", None, "Working")
+            threading.Event().wait(0.01)
+
+    job = manager.start("analyze", "p", work)
 
     assert wait_for(lambda: job.status == "running")
-    assert manager.cancel(job.id) is False
-    release.set()
+    assert manager.cancel(job.id) is True
+    assert job.finished.wait(2)
+    assert job.status == "cancelled"
+    assert job.message == "Cancelled by the user"
 
 
 # --- what the UI reads -------------------------------------------------------

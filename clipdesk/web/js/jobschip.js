@@ -157,7 +157,7 @@ function row(job, onOpenJob, close) {
           ? `${job.queue_position} ahead of it`
           : "Next in line"
       : job.status === "failed" || job.status === "cancelled"
-        ? job.error
+        ? job.error || job.message || "Cancelled by the user"
         : job.message || "";
 
   const canOpen = Boolean(onOpenJob && job.tab);
@@ -191,7 +191,7 @@ function row(job, onOpenJob, close) {
             : ""
       )
     ),
-    job.status === "queued"
+    job.status === "queued" || job.status === "running"
       ? h(
           "button.btn.btn-sm",
           {
@@ -200,7 +200,10 @@ function row(job, onOpenJob, close) {
               event.stopPropagation();
               try {
                 await api.cancelJob(job.id);
-                toast("Removed from the queue.", "ok");
+                toast(
+                  job.status === "queued" ? "Removed from the queue." : "Cancellation requested.",
+                  "ok"
+                );
                 refreshJobs();
               } catch (error) {
                 toast(error.message, "err");

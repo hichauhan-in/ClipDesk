@@ -16,6 +16,7 @@ import ipaddress
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import tempfile
 import threading
@@ -105,7 +106,7 @@ from clipdesk.bootstrap import (
     provision_all,
 )
 from clipdesk.config import Settings, load_settings, save_local_overrides
-from clipdesk.events import EventBus
+from clipdesk.events import EventBus, JobCancelled
 from clipdesk.ingest import (
     SUPPORTED_BROWSERS,
     FetchError,
@@ -177,6 +178,7 @@ from clipdesk.flows import (
     FlowHighlightStep,
     FlowNotesStep,
     FlowPromptStep,
+    FlowSaveStep,
     delete_flow,
     load_flows,
     save_flow,
@@ -212,7 +214,9 @@ from clipdesk.server.schemas import (
     IntroRequest,
     IntroStyleImportRequest,
     IntroStyleInstallRequest,
+    LinkBatchImportRequest,
     LocalImportRequest,
+    LocalBatchImportRequest,
     MediaAdoptRequest,
     NotesRequest,
     OutputRenameRequest,
@@ -635,6 +639,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         label = label or KIND_LABEL.get(kind, kind)
         tab = tab or KIND_TAB.get(kind, "")
+        job_meta = dict(meta or {})
+        if produces:
+            pending = set(pending_outputs(app_state, project))
+            active = {
+                str(item.get("meta", {}).get("produces", ""))
+                for item in app_state.jobs.list(project.id, active_only=True)
+            }
+            if produces in pending or produces in active:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Another queued or running job already writes '{produces}'. "
+                        "Choose a different output name or wait for it to finish."
+                    ),
+                )
+            job_meta["produces"] = produces
         if queue:
             step = app_state.sequence.add(
                 project.id,
@@ -643,7 +663,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 label=label,
                 produces=produces,
                 tab=tab,
-                meta=meta or {},
+                meta=job_meta,
             )
             return {
                 "queued": True,
@@ -661,7 +681,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             work,
             label=label,
             tab=tab,
-            meta=meta,
+            meta=job_meta,
             depends_on=after[-1:],
         )
         return {
@@ -697,6 +717,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Fold one action's usage into the project's running total."""
         if llm is not None:
             project.record_tokens(llm.meter.to_dict())
+    
+    def schedule_analysis(
+        app_state: UserState,
+        project: Project,
+        *,
+        skip_llm: bool = False,
+        provider: str | None = None,
+        depends_on: list[str] | None = None,
+        batch_index: int | None = None,
+    ):
+        app_state.ffmpeg()
+
+        def work(bus: EventBus) -> dict[str, Any]:
+            target = app_state.store.require(project.id)
+            settings = app_state.settings
+            llm = (
+                None
+                if skip_llm
+                else app_state.llm(provider, duration_s=target.meta.duration_s)
+            )
+            try:
+                report = analyze_project(target, settings, bus, llm=llm)
+            except JobCancelled:
+                target.set_status(
+                    "transcribed" if target.load_transcript_checkpoint() is not None else "new"
+                )
+                raise
+            except Exception as exc:
+                target.set_status("failed", str(exc) or exc.__class__.__name__)
+                raise
+            finally:
+                track_tokens(target, llm)
+            return {
+                "project_id": target.id,
+                "title": report.title,
+                "chapters": len(report.chapters),
+                "segments": len(report.transcript.segments),
+                "warnings": report.warnings,
+            }
+
+        return app_state.jobs.start(
+            "analyze",
+            project.id,
+            work,
+            label="Transcribing and analysing" if not skip_llm else "Transcribing",
+            tab="overview",
+            meta={"batch_index": batch_index} if batch_index is not None else {},
+            depends_on=depends_on,
+        )
 
     def artifact_payload(project: Project) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
@@ -717,11 +786,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return payload
 
     def project_payload(project: Project) -> dict[str, Any]:
+        checkpoint = project.load_transcript_checkpoint()
+        if checkpoint is None:
+            report = project.load_analysis()
+            checkpoint = report.transcript if report is not None else None
         return with_credits(
             {
                 **project.meta.to_dict(),
                 "artifacts": artifact_payload(project),
                 "source_exists": project.source_path.is_file(),
+                "transcript_available": checkpoint is not None,
+                "transcript_source": checkpoint.source.value if checkpoint else "",
+                "transcript_model": (checkpoint.model or "") if checkpoint else "",
+                "transcript_segments": len(checkpoint.segments) if checkpoint else 0,
             }
         )
 
@@ -1226,9 +1303,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     # --- files this machine already has ------------------------------------
-    # OneDrive is already signed in and already syncing, so a file it has is
-    # reachable with no tokens, no cookies and no paste. A SharePoint library
-    # added with "Add shortcut to OneDrive" shows up here as an ordinary folder.
     @app.get("/api/sources")
     def list_sources(app_state: UserState = Depends(current)) -> dict[str, Any]:
         if app_state.hosted:
@@ -1277,10 +1351,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "entries": [entry.to_dict() for entry in entries],
         }
 
-    @app.post("/api/projects/from-local", status_code=202)
-    def import_from_local(
-        request: LocalImportRequest, app_state: UserState = Depends(current)
-    ) -> dict[str, Any]:
+    def queue_local_import(
+        request: LocalImportRequest,
+        app_state: UserState,
+        *,
+        batch: bool = False,
+        batch_index: int | None = None,
+    ):
         if app_state.hosted:
             raise HTTPException(
                 status_code=403, detail="Server-local OneDrive is disabled in hosted mode."
@@ -1336,24 +1413,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"project_id": project.id, "file": filename, "size_bytes": written}
 
         job = app_state.jobs.start(
-            "download",
+            "batch-import" if batch else "download",
             project.id,
             work,
             label=f"Copying {source.name}",
             tab="overview",
-            meta={"source": str(source), "cloud_only": cloud_only},
+            meta={
+                "source": str(source),
+                "cloud_only": cloud_only,
+                **({"batch_index": batch_index} if batch_index is not None else {}),
+            },
         )
-        return {
+        payload = {
             "job_id": job.id,
             "project_id": project.id,
-            "kind": "download",
+            "kind": job.kind,
             "cloud_only": cloud_only,
         }
+        return payload, job, project
 
-    @app.post("/api/projects/from-link", status_code=202)
-    def import_from_link(
-        request: ImportLinkRequest, app_state: UserState = Depends(current)
+    @app.post("/api/projects/from-local", status_code=202)
+    def import_from_local(
+        request: LocalImportRequest, app_state: UserState = Depends(current)
     ) -> dict[str, Any]:
+        payload, _job, _project = queue_local_import(request, app_state)
+        return payload
+
+    @app.post("/api/projects/from-local/batch", status_code=202)
+    def import_from_local_batch(
+        request: LocalBatchImportRequest, app_state: UserState = Depends(current)
+    ) -> dict[str, Any]:
+        app_state.ffmpeg()
+        try:
+            roots = cloud_roots()
+            for item in request.items:
+                root = find_root(roots, item.root)
+                source = resolve_within(root, item.path)
+                if not source.is_file() or source.suffix.lower() not in VIDEO_SUFFIXES:
+                    raise BrowseError(f"'{item.path}' is not a supported media file.")
+        except BrowseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        projects: list[dict[str, Any]] = []
+        jobs: list[dict[str, Any]] = []
+        for index, item in enumerate(request.items, start=1):
+            payload, import_job, project = queue_local_import(
+                item, app_state, batch=True, batch_index=index
+            )
+            analysis_job = schedule_analysis(
+                app_state,
+                project,
+                depends_on=[import_job.id],
+                batch_index=index,
+            )
+            projects.append({"project_id": project.id, "name": project.meta.source_filename})
+            jobs.extend([import_job.summary(), analysis_job.summary()])
+        return {
+            "count": len(projects),
+            "projects": projects,
+            "jobs": jobs,
+            "project_id": projects[0]["project_id"],
+            "job_id": jobs[0]["id"],
+        }
+
+    def queue_link_import(
+        request: ImportLinkRequest,
+        app_state: UserState,
+        *,
+        batch: bool = False,
+        batch_index: int | None = None,
+    ):
         """Create a project and download the recording into it.
 
         The project is created immediately so the UI has somewhere to navigate to
@@ -1424,18 +1553,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
 
         job = app_state.jobs.start(
-            "download",
+            "batch-import" if batch else "download",
             project.id,
             work,
             label=f"Downloading from {link.get('kind', 'link')}",
             tab="overview",
-            meta={"url": request.url},
+            meta={
+                "url": request.url,
+                **({"batch_index": batch_index} if batch_index is not None else {}),
+            },
         )
-        return {
+        payload = {
             "job_id": job.id,
             "project_id": project.id,
-            "kind": "download",
+            "kind": job.kind,
             "link": link,
+        }
+        return payload, job, project
+
+    @app.post("/api/projects/from-link", status_code=202)
+    def import_from_link(
+        request: ImportLinkRequest, app_state: UserState = Depends(current)
+    ) -> dict[str, Any]:
+        payload, _job, _project = queue_link_import(request, app_state)
+        return payload
+
+    @app.post("/api/projects/from-links", status_code=202)
+    def import_from_links(
+        request: LinkBatchImportRequest, app_state: UserState = Depends(current)
+    ) -> dict[str, Any]:
+        app_state.ffmpeg()
+        for item in request.items:
+            _require_link_allowed(app_state, item.url)
+            effective_url = recalled_resolution(app_state.state_dir, item.url) or item.url
+            _require_link_allowed(app_state, effective_url)
+            try:
+                link = describe_link(effective_url, app_state.settings.paths.vendor_dir)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if link.get("is_folder"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Choose files from the folder before starting the batch.",
+                )
+
+        projects: list[dict[str, Any]] = []
+        jobs: list[dict[str, Any]] = []
+        for index, item in enumerate(request.items, start=1):
+            payload, import_job, project = queue_link_import(
+                item, app_state, batch=True, batch_index=index
+            )
+            analysis_job = schedule_analysis(
+                app_state,
+                project,
+                depends_on=[import_job.id],
+                batch_index=index,
+            )
+            projects.append({"project_id": project.id, "name": project.meta.source_filename})
+            jobs.extend([import_job.summary(), analysis_job.summary()])
+        return {
+            "count": len(projects),
+            "projects": projects,
+            "jobs": jobs,
+            "project_id": projects[0]["project_id"],
+            "job_id": jobs[0]["id"],
         }
 
     # --- projects ----------------------------------------------------------
@@ -1508,6 +1689,98 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project.save()
         return project_payload(project)
 
+    @app.post("/api/projects/batch", status_code=202)
+    async def create_projects_batch(
+        videos: list[UploadFile] = File(...),
+        transcripts: list[UploadFile] = File(default=[]),
+        title: str = Form(default=""),
+        app_state: UserState = Depends(current),
+    ) -> dict[str, Any]:
+        if not videos:
+            raise HTTPException(status_code=400, detail="Choose at least one media file.")
+        if len(videos) > 50:
+            raise HTTPException(status_code=400, detail="A batch can contain at most 50 files.")
+        app_state.ffmpeg()
+
+        transcript_by_stem = {
+            Path(item.filename or "").stem.casefold(): item
+            for item in transcripts
+            if item.filename
+        }
+        created: list[Project] = []
+        limit = app_state.settings.server.max_upload_mb * 1024 * 1024
+
+        try:
+            for index, video in enumerate(videos):
+                filename = safe_filename(video.filename or "video.mp4", fallback="video.mp4")
+                if Path(filename).suffix.lower() not in VIDEO_SUFFIXES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'{filename}' is not a supported media file.",
+                    )
+                project = app_state.store.create(
+                    filename,
+                    title=title.strip() if len(videos) == 1 else Path(filename).stem,
+                )
+                created.append(project)
+                written = 0
+                with project.source_path.open("wb") as handle:
+                    while chunk := await video.read(_UPLOAD_CHUNK):
+                        written += len(chunk)
+                        if written > limit:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=(
+                                    f"'{filename}' is larger than the "
+                                    f"{app_state.settings.server.max_upload_mb} MB limit."
+                                ),
+                            )
+                        handle.write(chunk)
+
+                transcript = transcript_by_stem.get(Path(filename).stem.casefold())
+                if transcript is None and len(videos) == 1 and len(transcripts) == 1:
+                    transcript = transcripts[0]
+                if transcript is not None:
+                    transcript_name = safe_filename(
+                        transcript.filename or "transcript.srt", fallback="transcript.srt"
+                    )
+                    if Path(transcript_name).suffix.lower() not in SUPPORTED_SUFFIXES:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{transcript_name}' is not a supported transcript.",
+                        )
+                    transcript_written = 0
+                    destination = project.source_dir / transcript_name
+                    with destination.open("wb") as handle:
+                        while chunk := await transcript.read(_UPLOAD_CHUNK):
+                            transcript_written += len(chunk)
+                            if transcript_written > _MAX_TRANSCRIPT_BYTES:
+                                raise HTTPException(
+                                    status_code=413,
+                                    detail=f"'{transcript_name}' is too large to be a transcript.",
+                                )
+                            handle.write(chunk)
+                    project.meta.transcript_filename = transcript_name
+                    project.meta.has_uploaded_transcript = True
+                project.meta.size_bytes = written
+                project.save()
+        except Exception:
+            for project in created:
+                app_state.store.delete(project.id)
+            raise
+
+        jobs = [
+            schedule_analysis(app_state, project, batch_index=index)
+            for index, project in enumerate(created, start=1)
+        ]
+        return {
+            "count": len(created),
+            "projects": [project_payload(project) for project in created],
+            "jobs": [job.summary() for job in jobs],
+            "project_id": created[0].id,
+            "job_id": jobs[0].id,
+        }
+
     @app.get("/api/projects/{project_id}")
     def get_project(
         project_id: str, app_state: UserState = Depends(current)
@@ -1534,45 +1807,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report = require_report(project)
         return report.model_dump(mode="json")
 
+    @app.get("/api/projects/{project_id}/transcript/checkpoint")
+    def get_transcript_checkpoint(
+        project_id: str, app_state: UserState = Depends(current)
+    ) -> Response:
+        project = require_project(project_id, app_state)
+        transcript = project.load_transcript_checkpoint()
+        if transcript is None:
+            report = project.load_analysis()
+            transcript = report.transcript if report is not None else None
+        if transcript is None or not transcript.segments:
+            raise HTTPException(status_code=404, detail="The transcript is not ready yet.")
+
+        def timestamp(seconds: float) -> str:
+            total = max(0, int(seconds))
+            hours, remainder = divmod(total, 3600)
+            minutes, secs = divmod(remainder, 60)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+        text = "\n".join(
+            f"{timestamp(segment.start)} "
+            f"{f'{segment.speaker}: ' if segment.speaker else ''}{segment.text.strip()}"
+            for segment in transcript.segments
+        )
+        return Response(text + "\n", media_type="text/plain; charset=utf-8")
+
     # --- actions -----------------------------------------------------------
     @app.post("/api/projects/{project_id}/analyze")
     def start_analysis(
         project_id: str, request: AnalyzeRequest, app_state: UserState = Depends(current)
     ) -> dict[str, Any]:
         project = require_project(project_id, app_state)
-        app_state.ffmpeg()
-        settings = app_state.settings
-        llm = (
-            None
-            if request.skip_llm
-            else app_state.llm(request.llm_provider, duration_s=project.meta.duration_s)
-        )
-
-        def work(bus: EventBus) -> dict[str, Any]:
-            try:
-                report = analyze_project(project, settings, bus, llm=llm)
-            except Exception as exc:
-                project.meta.status = "failed"
-                project.meta.error = str(exc) or exc.__class__.__name__
-                project.save()
-                raise
-            finally:
-                track_tokens(project, llm)
-            return {
-                "project_id": project.id,
-                "title": report.title,
-                "chapters": len(report.chapters),
-                "segments": len(report.transcript.segments),
-                "warnings": report.warnings,
-            }
-
-        return start_job(
+        job = schedule_analysis(
             app_state,
-            "analyze",
             project,
-            work,
-            label="Transcribing and analysing" if llm else "Transcribing",
+            skip_llm=request.skip_llm,
+            provider=request.llm_provider,
         )
+        return {
+            "job_id": job.id,
+            "project_id": project.id,
+            "kind": "analyze",
+            "status": job.status,
+            "tab": job.tab,
+            "queued": False,
+            "after": [],
+        }
 
     @app.post("/api/projects/{project_id}/notes")
     def start_notes(
@@ -2826,6 +3106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         seen_outro = False
         available_sources = {"source"}
         output_names: set[str] = set()
+        available_files: set[str] = set()
 
         def step_output(step: Any) -> str:
             if isinstance(step, FlowCleanupStep):
@@ -2862,6 +3143,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=400,
                     detail=f"Flow step {index}: enter a topic for the Topic highlight.",
                 )
+            if isinstance(step, FlowSaveStep):
+                if app_state.hosted:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Hosted Flows cannot write to server-local destination paths.",
+                    )
+                destination = Path(step.destination).expanduser()
+                if not destination.is_absolute():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Flow step {index}: the save destination must be an absolute folder path.",
+                    )
+                if destination.exists() and not destination.is_dir():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Flow step {index}: the save destination is not a folder.",
+                    )
+                missing = [name for name in step.files if name not in available_files]
+                if missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Flow step {index}: {', '.join(missing)} must be produced by an earlier step."
+                        ),
+                    )
             if isinstance(step, FlowBookendStep):
                 if step.source == "local":
                     if app_state.hosted:
@@ -2892,6 +3198,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                 output_names.add(output)
                 available_sources.add(output)
+                available_files.add(output)
+            if isinstance(step, FlowNotesStep):
+                available_files.add("notes.md")
 
         final_output = ""
         intro_asset: str | None = None
@@ -3214,6 +3523,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             ),
                             app_state,
                         )
+                    )
+                elif isinstance(step, FlowSaveStep):
+                    destination = Path(step.destination).expanduser()
+
+                    def save_files_work(bus: EventBus, item=step, folder=destination):
+                        bus.stage_start("save", f"Saving {len(item.files)} file(s)")
+                        folder.mkdir(parents=True, exist_ok=True)
+                        saved: list[str] = []
+                        for index, filename in enumerate(item.files, start=1):
+                            source = project.output_path(safe_filename(filename))
+                            if not source.is_file():
+                                raise RuntimeError(f"The Flow output '{filename}' was not created.")
+                            target = folder / source.name
+                            if target.exists() and not item.replace_existing:
+                                counter = 2
+                                while target.exists():
+                                    target = folder / f"{source.stem}-{counter}{source.suffix}"
+                                    counter += 1
+                            descriptor, temporary_name = tempfile.mkstemp(
+                                prefix=f".{source.stem}-", suffix=source.suffix, dir=folder
+                            )
+                            os.close(descriptor)
+                            temporary = Path(temporary_name)
+                            try:
+                                shutil.copy2(source, temporary)
+                                temporary.replace(target)
+                            finally:
+                                temporary.unlink(missing_ok=True)
+                            saved.append(str(target))
+                            bus.progress(
+                                "save", index / len(item.files), f"Saved {target.name}"
+                            )
+                        bus.stage_end("save", f"Saved {len(saved)} file(s)")
+                        return {"files": saved, "destination": str(folder)}
+
+                    add_pending(
+                        "export",
+                        f"Save {len(step.files)} file(s) → {destination}",
+                        "",
+                        save_files_work,
+                        tab="flows",
                     )
             if not queued:
                 raise HTTPException(

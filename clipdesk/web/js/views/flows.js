@@ -12,6 +12,7 @@ const STEP_LABEL = {
   intro: "Intro",
   outro: "Outro",
   assemble: "Assemble",
+  save: "Save files",
 };
 
 const ENRICHMENT = [
@@ -89,6 +90,9 @@ function newStep(type) {
       output_name: `flow-${type}.mp4`,
     };
   }
+  if (type === "save") {
+    return { type, files: [], destination: "", replace_existing: false };
+  }
   return {
     type: "assemble",
     input_from: "flow-cleaned.mp4",
@@ -159,6 +163,22 @@ export function createFlowsPane({ project, analysis, jobPanel, ctx }) {
         previous.output_name,
         `${previous.output_name} — ${STEP_LABEL[previous.type]}`,
       ]);
+    }
+    return options;
+  }
+
+  function generatedFileOptions(index) {
+    const options = [];
+    for (const previous of current.steps.slice(0, index)) {
+      if (previous.type === "notes") {
+        options.push(["notes.md", "notes.md — Notes"]);
+        continue;
+      }
+      if (!["cleanup", "clip", "highlight", "prompt", "intro", "outro", "assemble"].includes(previous.type)) continue;
+      if ((previous.type === "intro" || previous.type === "outro") && previous.source === "local") continue;
+      if (previous.output_name) {
+        options.push([previous.output_name, `${previous.output_name} — ${STEP_LABEL[previous.type]}`]);
+      }
     }
     return options;
   }
@@ -378,6 +398,47 @@ export function createFlowsPane({ project, analysis, jobPanel, ctx }) {
       );
     }
 
+    if (step.type === "save") {
+      const options = generatedFileOptions(index);
+      return h(
+        "div.flow-fields",
+        h(
+          "fieldset.pane-group",
+          h("legend", "Files to save"),
+          options.length
+            ? h(
+                "div.flow-save-files",
+                options.map(([filename, label]) =>
+                  check(label, step.files.includes(filename), (selected) => {
+                    step.files = selected
+                      ? [...new Set([...step.files, filename])]
+                      : step.files.filter((item) => item !== filename);
+                  })
+                )
+              )
+            : h("div.faint.small", "Add a file-producing step above this one first.")
+        ),
+        field(
+          "Destination folder",
+          input(step.destination, (value) => (step.destination = value), {
+            placeholder: "C:\\Users\\you\\OneDrive - Organization\\Published",
+          })
+        ),
+        h(
+          "div.flow-checks",
+          check(
+            "Replace files with the same name",
+            step.replace_existing,
+            (value) => (step.replace_existing = value)
+          )
+        ),
+        h(
+          "div.faint.small",
+          "Synced OneDrive folders work like local folders. Without replace, ClipDesk adds -2, -3, and so on."
+        )
+      );
+    }
+
     return h(
       "div.flow-fields",
       sourceField(step, index),
@@ -429,7 +490,12 @@ export function createFlowsPane({ project, analysis, jobPanel, ctx }) {
         h("option", { value: "intro" }, "Intro"),
         h("option", { value: "outro" }, "Outro")
       ),
-      h("optgroup", { label: "Finish" }, h("option", { value: "assemble" }, "Assemble"))
+      h(
+        "optgroup",
+        { label: "Finish" },
+        h("option", { value: "assemble" }, "Assemble"),
+        h("option", { value: "save" }, "Save files")
+      )
     );
 
     const stepSummary = (step) => {
@@ -439,6 +505,9 @@ export function createFlowsPane({ project, analysis, jobPanel, ctx }) {
       const output = step.output_name || (step.type === "notes" ? "notes.md" : "Configured output");
       if (step.type === "intro" || step.type === "outro") {
         return step.source === "local" ? "Fixed local file" : `${step.style_id} → ${output}`;
+      }
+      if (step.type === "save") {
+        return `${step.files.length} file(s) → ${step.destination || "Choose destination"}`;
       }
       return `${source} → ${output}`;
     };
@@ -526,7 +595,12 @@ export function createFlowsPane({ project, analysis, jobPanel, ctx }) {
         addType,
         h("button.btn.btn-sm", {
           onclick: () => {
-            current.steps.push(newStep(addType.value));
+            const added = newStep(addType.value);
+            if (added.type === "save") {
+              const available = generatedFileOptions(current.steps.length);
+              if (available.length) added.files = [available.at(-1)[0]];
+            }
+            current.steps.push(added);
             expandedIndex = current.steps.length - 1;
             drawEditor();
           },

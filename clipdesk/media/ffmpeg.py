@@ -123,12 +123,21 @@ def run_with_progress(
 
     tail: list[str] = []
     assert process.stderr is not None
-    for line in process.stderr:
-        tail.append(line.rstrip())
-        del tail[:-40]
-        if on_elapsed and (match := _TIME_RE.search(line)) is not None:
-            hours, minutes, seconds = match.groups()
-            on_elapsed(int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+    try:
+        for line in process.stderr:
+            tail.append(line.rstrip())
+            del tail[:-40]
+            if on_elapsed and (match := _TIME_RE.search(line)) is not None:
+                hours, minutes, seconds = match.groups()
+                on_elapsed(int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
     process.wait()
 
     if process.returncode != 0:

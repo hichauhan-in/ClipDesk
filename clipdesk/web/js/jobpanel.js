@@ -1,6 +1,6 @@
 // The live job panel: a progress bar, a stage label and a scrolling log.
 
-import { followJob } from "./api.js";
+import { api, followJob } from "./api.js";
 import { h, mount, toast } from "./dom.js";
 import { refreshJobs } from "./jobs.js";
 
@@ -17,10 +17,15 @@ export function createJobPanel() {
   const fill = h("i", { style: { width: "0%" } });
   const bar = h("div.bar", fill);
   const console_ = h("div.console.small");
+  const cancelButton = h(
+    "button.btn.btn-sm.btn-ghost.btn-danger",
+    { type: "button", style: { display: "none" } },
+    "Cancel"
+  );
   const wrapper = h(
     "div.stack",
     { style: { display: "none" } },
-    h("div.row-between", label),
+    h("div.row-between", label, cancelButton),
     bar,
     h("details", h("summary", { class: "small" }, "Details"), console_)
   );
@@ -48,7 +53,7 @@ export function createJobPanel() {
    * @param {Promise<{job_id:string}>} startPromise a call that starts the job
    * @param {{title?:string, onDone?:Function, onError?:Function}} options
    */
-  async function run(startPromise, { title = "Working", onDone, onError } = {}) {
+  async function run(startPromise, { title = "Working", onDone, onError, onEvent } = {}) {
     cancel();
     wrapper.style.display = "";
     console_.replaceChildren();
@@ -66,7 +71,7 @@ export function createJobPanel() {
     }
 
     refreshJobs();
-    attach(started.job_id, { onDone, onError });
+    attach(started.job_id, { onDone, onError, onEvent });
     return started;
   }
 
@@ -74,18 +79,34 @@ export function createJobPanel() {
    * Reattach to a job that is already running, which is what makes leaving a tab
    * safe: the work never belonged to the view, only the progress bar did.
    */
-  function follow(jobId, { title = "Working", onDone, onError } = {}) {
+  function follow(jobId, { title = "Working", onDone, onError, onEvent } = {}) {
     cancel();
     wrapper.style.display = "";
     console_.replaceChildren();
     label.textContent = title;
     setProgress(null);
-    attach(jobId, { onDone, onError });
+    attach(jobId, { onDone, onError, onEvent });
   }
 
-  function attach(jobId, { onDone, onError } = {}) {
+  function attach(jobId, { onDone, onError, onEvent } = {}) {
+    cancelButton.style.display = "";
+    cancelButton.disabled = false;
+    cancelButton.textContent = "Cancel";
+    cancelButton.onclick = async () => {
+      cancelButton.disabled = true;
+      cancelButton.textContent = "Cancelling…";
+      try {
+        const result = await api.cancelJob(jobId);
+        if (!result.cancelled) throw new Error("This job can no longer be cancelled.");
+      } catch (error) {
+        toast(error.message, "err");
+        cancelButton.disabled = false;
+        cancelButton.textContent = "Cancel";
+      }
+    };
     stop = followJob(jobId, {
       onEvent(event) {
+        onEvent?.(event);
         if (event.message) {
           const stage = event.stage ? `[${event.stage}] ` : "";
           line(`${stage}${event.message}`, event.type);
@@ -99,6 +120,7 @@ export function createJobPanel() {
       },
       onDone(result) {
         stop = null;
+        cancelButton.style.display = "none";
         setProgress(1);
         label.textContent = "Finished";
         refreshJobs();
@@ -106,6 +128,7 @@ export function createJobPanel() {
       },
       onError(message) {
         stop = null;
+        cancelButton.style.display = "none";
         bar.classList.remove("indeterminate");
         fill.style.width = "100%";
         fill.style.background = "var(--bad)";
@@ -117,12 +140,26 @@ export function createJobPanel() {
         refreshJobs();
         onError?.(new Error(message));
       },
+      onCancelled() {
+        stop = null;
+        cancelButton.style.display = "none";
+        bar.classList.remove("indeterminate");
+        fill.style.width = "100%";
+        fill.style.background = "var(--warn)";
+        label.textContent = "Cancelled";
+        line("Cancelled by the user", "warning");
+        refreshJobs();
+        onError?.(new Error("Cancelled by the user"));
+      },
     });
   }
 
   function cancel() {
     stop?.();
     stop = null;
+    cancelButton.style.display = "none";
+    cancelButton.disabled = false;
+    cancelButton.textContent = "Cancel";
     fill.style.background = "";
   }
 

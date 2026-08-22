@@ -46,10 +46,19 @@ class ProgressEvent:
 Subscriber = Callable[[ProgressEvent], None]
 
 
+class JobCancelled(RuntimeError):
+    pass
+
+
 class EventBus:
-    def __init__(self) -> None:
+    def __init__(self, is_cancelled: Callable[[], bool] | None = None) -> None:
         self._subscribers: list[Subscriber] = []
         self._lock = threading.Lock()
+        self._is_cancelled = is_cancelled or (lambda: False)
+
+    def check_cancelled(self) -> None:
+        if self._is_cancelled():
+            raise JobCancelled("Cancelled by the user")
 
     def subscribe(self, subscriber: Subscriber) -> Callable[[], None]:
         with self._lock:
@@ -63,6 +72,7 @@ class EventBus:
         return unsubscribe
 
     def publish(self, event: ProgressEvent) -> None:
+        self.check_cancelled()
         with self._lock:
             targets = list(self._subscribers)
         for subscriber in targets:

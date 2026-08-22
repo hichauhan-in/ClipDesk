@@ -79,6 +79,13 @@ class FlowAssembleStep(BaseModel):
     output_name: str = Field(default="final.mp4", min_length=1, max_length=180)
 
 
+class FlowSaveStep(BaseModel):
+    type: Literal["save"] = "save"
+    files: list[str] = Field(min_length=1, max_length=20)
+    destination: str = Field(min_length=1, max_length=1000)
+    replace_existing: bool = False
+
+
 FlowStep = Annotated[
     FlowNotesStep
     | FlowCleanupStep
@@ -86,7 +93,8 @@ FlowStep = Annotated[
     | FlowHighlightStep
     | FlowPromptStep
     | FlowBookendStep
-    | FlowAssembleStep,
+    | FlowAssembleStep
+    | FlowSaveStep,
     Field(discriminator="type"),
 ]
 

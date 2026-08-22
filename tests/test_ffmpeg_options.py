@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from clipdesk.events import JobCancelled
 from clipdesk.media import ffmpeg as ffmpeg_module
 from clipdesk.media.ffmpeg import FFmpegError, filter_complex_args, filter_script_option
 
@@ -114,3 +115,33 @@ def test_a_graph_is_only_inlined_when_there_is_no_other_way(monkeypatch, tmp_pat
 
     assert args == ["-filter_complex", "nullsrc[out]"]
     assert script is None
+
+
+def test_progress_cancellation_terminates_ffmpeg(monkeypatch):
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = iter(["frame=1 time=00:00:01.00\n"])
+            self.returncode = None
+            self.terminated = False
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    process = FakeProcess()
+    monkeypatch.setattr(ffmpeg_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(JobCancelled):
+        ffmpeg_module.run_with_progress(
+            "ffmpeg",
+            ["-i", "input.mp4", "output.mp4"],
+            on_elapsed=lambda _seconds: (_ for _ in ()).throw(JobCancelled()),
+        )
+
+    assert process.terminated is True

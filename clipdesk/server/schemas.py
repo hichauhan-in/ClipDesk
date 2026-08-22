@@ -145,7 +145,8 @@ class IntroRequest(Queueable):
     voiceover_text: str = Field(default="", max_length=1200)
     voice_id: str = Field(default="", max_length=180)
     audio_id: str = Field(default="elevate", max_length=220)
-    output_name: str = "intro.mp4"
+    #: Blank lets the /intro and /outro endpoints choose their own safe default.
+    output_name: str = ""
 
 
 class IntroStyleInstallRequest(BaseModel):
@@ -231,6 +232,10 @@ class LocalImportRequest(BaseModel):
     title: str = ""
 
 
+class LocalBatchImportRequest(BaseModel):
+    items: list[LocalImportRequest] = Field(min_length=1, max_length=50)
+
+
 class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
     #: Let ClipDesk size requests and pick the model.
@@ -269,6 +274,10 @@ class ImportLinkRequest(BaseModel):
     title: str = ""
     #: Reuse a browser sign-in. Needed for tenant SharePoint and Stream.
     browser_cookies: str = ""
+
+
+class LinkBatchImportRequest(BaseModel):
+    items: list[ImportLinkRequest] = Field(min_length=1, max_length=50)
 
 
 class InspectLinkRequest(BaseModel):

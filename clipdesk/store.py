@@ -18,18 +18,29 @@ import json
 import re
 import shutil
 import tempfile
+import threading
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from clipdesk.models import AnalysisReport, Artifact, ArtifactKind, utcnow
+from clipdesk.models import AnalysisReport, Artifact, ArtifactKind, Transcript, utcnow
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,80}$")
 
 PROJECT_FILE = "project.json"
 ANALYSIS_FILE = "analysis.json"
+TRANSCRIPT_FILE = "transcript.json"
+
+_PROJECT_LOCKS_GUARD = threading.Lock()
+_PROJECT_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _project_lock(root: Path) -> threading.RLock:
+    key = str(root.resolve())
+    with _PROJECT_LOCKS_GUARD:
+        return _PROJECT_LOCKS.setdefault(key, threading.RLock())
 
 
 def slugify(name: str, *, fallback: str = "video", max_len: int = 40) -> str:
@@ -46,7 +57,7 @@ class ProjectMeta:
     source_filename: str
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
-    status: str = "new"  # new | downloading | analyzing | ready | failed
+    status: str = "new"  # new | downloading | analyzing | transcribed | ready | failed
     duration_s: float = 0.0
     size_bytes: int = 0
     has_uploaded_transcript: bool = False
@@ -100,6 +111,7 @@ class Project:
     def __init__(self, root: Path, meta: ProjectMeta) -> None:
         self.root = root
         self.meta = meta
+        self._lock = _project_lock(root)
 
     # --- layout ------------------------------------------------------------
     @property
@@ -132,6 +144,10 @@ class Project:
     def analysis_path(self) -> Path:
         return self.root / ANALYSIS_FILE
 
+    @property
+    def transcript_checkpoint_path(self) -> Path:
+        return self.root / TRANSCRIPT_FILE
+
     def output_path(self, filename: str) -> Path:
         """Resolve a name inside ``output/``, refusing anything that escapes it.
 
@@ -146,6 +162,10 @@ class Project:
 
     # --- persistence -------------------------------------------------------
     def save(self) -> None:
+        with self._lock:
+            self._save_locked()
+
+    def _save_locked(self) -> None:
         self.meta.updated_at = utcnow()
         self.root.mkdir(parents=True, exist_ok=True)
         destination = self.root / PROJECT_FILE
@@ -160,6 +180,15 @@ class Project:
             temporary.replace(destination)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def _refresh_meta_locked(self) -> None:
+        path = self.root / PROJECT_FILE
+        if not path.is_file():
+            return
+        try:
+            self.meta = ProjectMeta.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            return
 
     def save_analysis(self, report: AnalysisReport) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -187,6 +216,43 @@ class Project:
             self.analysis_path.read_text(encoding="utf-8")
         )
 
+    def save_transcript_checkpoint(self, transcript: Transcript) -> Path:
+        self.root.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".transcript-", suffix=".json.tmp", dir=self.root
+        )
+        temporary = Path(temporary_name)
+        try:
+            with open(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+                handle.write(transcript.model_dump_json(indent=2, exclude_none=False))
+                handle.flush()
+            temporary.replace(self.transcript_checkpoint_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        with self._lock:
+            self._refresh_meta_locked()
+            self.meta.status = "transcribed"
+            self.meta.error = ""
+            self._save_locked()
+        return self.transcript_checkpoint_path
+
+    def load_transcript_checkpoint(self) -> Transcript | None:
+        if not self.transcript_checkpoint_path.is_file():
+            return None
+        try:
+            return Transcript.model_validate_json(
+                self.transcript_checkpoint_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+
+    def set_status(self, status: str, error: str = "") -> None:
+        with self._lock:
+            self._refresh_meta_locked()
+            self.meta.status = status
+            self.meta.error = error
+            self._save_locked()
+
     # --- artifacts ---------------------------------------------------------
     def add_artifact(
         self,
@@ -206,59 +272,67 @@ class Project:
             duration_s=duration_s,
             meta=meta or {},
         )
-        # Re-running an action replaces its previous output rather than piling up.
-        self.meta.artifacts = [
-            existing for existing in self.meta.artifacts if existing.get("id") != artifact.id
-        ]
-        self.meta.artifacts.append(artifact.model_dump(mode="json"))
-        self.save()
+        with self._lock:
+            # Jobs capture Project instances when they are submitted. A later job
+            # may therefore hold metadata from before an earlier queued job saved
+            # its output. Merge against disk inside one project-wide lock.
+            self._refresh_meta_locked()
+            self.meta.artifacts = [
+                existing for existing in self.meta.artifacts if existing.get("id") != artifact.id
+            ]
+            self.meta.artifacts.append(artifact.model_dump(mode="json"))
+            self._save_locked()
         return artifact
 
     def record_tokens(self, usage: dict[str, Any]) -> None:
         """Add one action's usage to this project's running total."""
         if not usage or not usage.get("total_tokens"):
             return
-        current = self.meta.tokens or {}
-        by_task = dict(current.get("by_task") or {})
-        for task, entry in (usage.get("by_task") or {}).items():
-            running = by_task.setdefault(task, {"calls": 0, "prompt": 0, "completion": 0})
-            for key in ("calls", "prompt", "completion"):
-                running[key] = running.get(key, 0) + entry.get(key, 0)
-        by_model = dict(current.get("by_model") or {})
-        for model, entry in (usage.get("by_model") or {}).items():
-            running = by_model.setdefault(model, {"calls": 0, "prompt": 0, "completion": 0})
-            for key in ("calls", "prompt", "completion"):
-                running[key] = running.get(key, 0) + entry.get(key, 0)
-        self.meta.tokens = {
-            "calls": current.get("calls", 0) + usage.get("calls", 0),
-            "prompt_tokens": current.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0),
-            "completion_tokens": (
-                current.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
-            ),
-            "total_tokens": current.get("total_tokens", 0) + usage.get("total_tokens", 0),
-            # One estimated call makes the whole total an estimate.
-            "measured": bool(current.get("measured", True)) and bool(usage.get("measured", True)),
-            "by_task": by_task,
-            "by_model": by_model,
-            "models": sorted({*(current.get("models") or []), *(usage.get("models") or [])}),
-        }
-        self.save()
+        with self._lock:
+            self._refresh_meta_locked()
+            current = self.meta.tokens or {}
+            by_task = dict(current.get("by_task") or {})
+            for task, entry in (usage.get("by_task") or {}).items():
+                running = by_task.setdefault(task, {"calls": 0, "prompt": 0, "completion": 0})
+                for key in ("calls", "prompt", "completion"):
+                    running[key] = running.get(key, 0) + entry.get(key, 0)
+            by_model = dict(current.get("by_model") or {})
+            for model, entry in (usage.get("by_model") or {}).items():
+                running = by_model.setdefault(model, {"calls": 0, "prompt": 0, "completion": 0})
+                for key in ("calls", "prompt", "completion"):
+                    running[key] = running.get(key, 0) + entry.get(key, 0)
+            self.meta.tokens = {
+                "calls": current.get("calls", 0) + usage.get("calls", 0),
+                "prompt_tokens": current.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0),
+                "completion_tokens": (
+                    current.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+                ),
+                "total_tokens": current.get("total_tokens", 0) + usage.get("total_tokens", 0),
+                # One estimated call makes the whole total an estimate.
+                "measured": bool(current.get("measured", True)) and bool(usage.get("measured", True)),
+                "by_task": by_task,
+                "by_model": by_model,
+                "models": sorted({*(current.get("models") or []), *(usage.get("models") or [])}),
+            }
+            self._save_locked()
 
     def remove_artifact(self, artifact_id: str) -> bool:
-        remaining = []
-        removed = False
-        for entry in self.meta.artifacts:
-            if entry.get("id") == artifact_id:
-                removed = True
-                filename = entry.get("filename")
-                if filename:
-                    (self.output_dir / str(filename)).unlink(missing_ok=True)
-                continue
-            remaining.append(entry)
-        self.meta.artifacts = remaining
-        if removed:
-            self.save()
-        return removed
+        with self._lock:
+            self._refresh_meta_locked()
+            remaining = []
+            removed = False
+            for entry in self.meta.artifacts:
+                if entry.get("id") == artifact_id:
+                    removed = True
+                    filename = entry.get("filename")
+                    if filename:
+                        (self.output_dir / str(filename)).unlink(missing_ok=True)
+                    continue
+                remaining.append(entry)
+            self.meta.artifacts = remaining
+            if removed:
+                self._save_locked()
+            return removed
 
     def cleanup_scratch(self) -> None:
         """Drop the extracted audio; it is large and trivially regenerated."""

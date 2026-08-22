@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from clipdesk.events import EventBus, EventType, ProgressEvent
+from clipdesk.events import EventBus, EventType, JobCancelled, ProgressEvent
 
 MAX_EVENTS = 800
 
@@ -54,10 +54,12 @@ LANES: dict[str, int] = {
 #: because assuming something is expensive is the safe mistake.
 KIND_LANE: dict[str, str] = {
     "analyze": "media",
+    "batch-import": "media",
     "cleanup": "media",
     "clips": "media",
     "bookend": "media",
     "intro": "media",
+    "outro": "media",
     "prompt-edit": "media",
     "download": "network",
     "asset-download": "network",
@@ -76,10 +78,12 @@ NEEDS_CHOICE = {"clips-find", "highlights-find"}
 #: What each kind is called in the UI.
 KIND_LABEL: dict[str, str] = {
     "analyze": "Analysing",
+    "batch-import": "Importing recording",
     "cleanup": "Clean cut",
     "clips": "Rendering clips",
     "bookend": "Intro and outro",
     "intro": "Building intro",
+    "outro": "Building outro",
     "prompt-edit": "Applying video edit",
     "download": "Downloading",
     "asset-download": "Adding editor asset",
@@ -93,6 +97,7 @@ KIND_LABEL: dict[str, str] = {
 #: Which project tab a job belongs to, so the UI can send the user back to it.
 KIND_TAB: dict[str, str] = {
     "analyze": "overview",
+    "batch-import": "overview",
     "notes": "transcript",
     "article": "transcript",
     "clips-find": "clip",
@@ -101,6 +106,7 @@ KIND_TAB: dict[str, str] = {
     "highlights-find": "clip",
     "bookend": "editor",
     "intro": "editor",
+    "outro": "editor",
     "prompt-edit": "editor",
     "asset-download": "editor",
     "export": "outputs",
@@ -140,6 +146,7 @@ class Job:
     message: str = ""
     events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=MAX_EVENTS))
     finished: threading.Event = field(default_factory=threading.Event)
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
     _listeners: list[Callable[[dict[str, Any]], None]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -307,15 +314,15 @@ class JobManager:
         return job
 
     def cancel(self, job_id: str) -> bool:
-        """Drop a job that has not started yet.
-
-        A running job is left alone: killing ffmpeg mid-write or a model call
-        mid-flight leaves debris, and saying so is better than pretending the
-        stop worked.
-        """
+        """Cancel queued work immediately or ask running work to stop cooperatively."""
         job = self.get(job_id)
-        if job is None or job.status != "queued":
+        if job is None or job.status not in {"queued", "running"}:
             return False
+        if job.status == "running":
+            job.cancel_requested.set()
+            job.message = "Cancelling…"
+            job.emit(ProgressEvent(EventType.LOG, job.kind, job.message).to_dict())
+            return True
         job.status = "cancelled"
         job.message = "Cancelled before it started"
         job.finished_at = time.time()
@@ -387,12 +394,13 @@ class JobManager:
         job.status = "running"
         job.started_at = time.time()
         job.message = "Starting"
-        bus = EventBus()
+        bus = EventBus(job.cancel_requested.is_set)
         bus.subscribe(lambda event: job.emit(event.to_dict()))
         job.emit(ProgressEvent(EventType.LOG, job.kind, f"Started {job.label}").to_dict())
 
         try:
             result = work(bus) or {}
+            bus.check_cancelled()
             job.result = result
             job.status = "done"
             job.fraction = 1.0
@@ -402,6 +410,11 @@ class JobManager:
                     EventType.DONE, job.kind, "Finished", 1.0, {"result": result}
                 ).to_dict()
             )
+        except JobCancelled as exc:
+            job.status = "cancelled"
+            job.error = ""
+            job.message = str(exc)
+            job.emit(ProgressEvent(EventType.LOG, job.kind, job.message).to_dict())
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.error = str(exc) or exc.__class__.__name__

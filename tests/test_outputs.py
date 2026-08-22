@@ -60,6 +60,67 @@ def test_resolving_returns_real_paths(project):
     assert [path.name for path in paths] == ["notes.md", "summary.md"]
 
 
+def test_stale_job_snapshots_merge_artifacts_instead_of_losing_outputs(tmp_path):
+    store = ProjectStore(tmp_path / "workspace")
+    created = store.create("meeting.mp4")
+    first = store.get(created.id)
+    second = store.get(created.id)
+    intro = created.output_path("intro.mp4")
+    outro = created.output_path("outro.mp4")
+    intro.write_bytes(b"intro")
+    outro.write_bytes(b"outro")
+
+    first.add_artifact(ArtifactKind.INTRO, "Intro", intro)
+    second.add_artifact(ArtifactKind.OUTRO, "Outro", outro)
+
+    reloaded = store.require(created.id)
+    assert [(item["kind"], item["filename"]) for item in reloaded.meta.artifacts] == [
+        ("intro", "intro.mp4"),
+        ("outro", "outro.mp4"),
+    ]
+
+
+def test_stale_removal_preserves_artifacts_added_after_the_snapshot(tmp_path):
+    store = ProjectStore(tmp_path / "workspace")
+    created = store.create("meeting.mp4")
+    notes = created.output_path("notes.md")
+    notes.write_text("notes", encoding="utf-8")
+    created.add_artifact(ArtifactKind.NOTES, "Notes", notes)
+    stale = store.require(created.id)
+    intro = created.output_path("intro.mp4")
+    intro.write_bytes(b"intro")
+    created.add_artifact(ArtifactKind.INTRO, "Intro", intro)
+
+    assert stale.remove_artifact("notes-notes") is True
+
+    reloaded = store.require(created.id)
+    assert [(item["kind"], item["filename"]) for item in reloaded.meta.artifacts] == [
+        ("intro", "intro.mp4")
+    ]
+
+
+def test_stale_job_snapshots_accumulate_token_usage(tmp_path):
+    store = ProjectStore(tmp_path / "workspace")
+    created = store.create("meeting.mp4")
+    first = store.require(created.id)
+    second = store.require(created.id)
+    usage = {
+        "calls": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "measured": True,
+        "by_task": {"notes": {"calls": 1, "prompt": 10, "completion": 5}},
+        "by_model": {"model": {"calls": 1, "prompt": 10, "completion": 5}},
+        "models": ["model"],
+    }
+
+    first.record_tokens(usage)
+    second.record_tokens(usage)
+
+    assert store.require(created.id).meta.tokens["total_tokens"] == 30
+
+
 # --- delete ------------------------------------------------------------------
 def test_delete_removes_the_file_and_the_artifact(project):
     assert delete_output(project, "notes.md") is True

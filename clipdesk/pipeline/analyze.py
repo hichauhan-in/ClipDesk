@@ -72,6 +72,13 @@ def analyze_project(
             "No speech was found in this video, so there is nothing to analyse. "
             "If the recording has no narration, upload a transcript alongside it."
         )
+    project.save_transcript_checkpoint(transcript)
+    bus.stage_end(
+        "checkpoint",
+        "Transcript ready",
+        transcript_ready=True,
+        segments=len(transcript.segments),
+    )
 
     # 3. Silence is cheap to detect and drives the cleanup cut.
     bus.stage_start("silence", "Finding silent stretches")
@@ -140,6 +147,22 @@ def _get_transcript(
     ffmpeg_bin: str,
     warnings: list[str],
 ) -> Transcript:
+    checkpoint = project.load_transcript_checkpoint()
+    if checkpoint is not None and checkpoint.segments:
+        bus.stage_start("transcript", "Reusing the saved transcript")
+        bus.stage_end(
+            "transcript", f"Loaded {len(checkpoint.segments)} segments from the checkpoint"
+        )
+        return checkpoint
+    previous = project.load_analysis()
+    if previous is not None and previous.transcript.segments:
+        bus.stage_start("transcript", "Promoting the existing transcript checkpoint")
+        bus.stage_end(
+            "transcript",
+            f"Loaded {len(previous.transcript.segments)} segments from the previous analysis",
+        )
+        return previous.transcript
+
     uploaded = project.transcript_upload_path
     if uploaded is not None and uploaded.is_file():
         bus.stage_start("transcript", f"Reading {uploaded.name}")

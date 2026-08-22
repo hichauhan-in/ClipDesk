@@ -201,9 +201,17 @@ a work machine this is usually a single click. Nothing to copy or paste.
 If the link points at a **folder**, ClipDesk lists the videos inside it and lets
 you choose — several at a time if you want, each becoming its own recording.
 
-**Upload a file** — drag it in. If you have the `.vtt` from a Teams recording,
+**Upload files** — drag them in. If you have the `.vtt` from a Teams recording,
 add it alongside the video: that skips transcription entirely and makes the whole
 thing near-instant.
+
+You can select several local files at once. ClipDesk creates one project per file
+and queues analysis in the same order. Transcript files selected with the batch
+are matched to videos by basename. SharePoint/OneDrive folder results and the
+synced OneDrive picker also support multi-selection; those batches run strictly
+as import 1 → analyse 1 → import 2 → analyse 2, so large recordings never compete
+for CPU, disk or network resources. Existing single-file Import actions keep their
+original behavior.
 
 **From OneDrive** — browse the OneDrive already synced on this machine, with a
 search box for finding a recording by name. Nothing to sign in to, because
@@ -217,6 +225,13 @@ Analysis starts automatically. It extracts the transcript, finds the silences,
 and asks the model what the recording contains. A 30-minute meeting with a
 supplied transcript takes about a minute; the same meeting needing
 speech-to-text takes five to ten.
+
+The transcript is saved as its own checkpoint before silence detection or model
+analysis begins. As soon as it is ready, the **transcribed** badge beside the
+recording details becomes clickable and copies the complete timestamped
+transcript. Cancelling later analysis keeps that checkpoint; **Continue analysis**
+resumes from it without running speech-to-text again. Queued and running jobs can
+be cancelled beside their progress bar or from the Jobs list.
 
 ### 3. Look at the Overview
 
@@ -716,7 +731,10 @@ steps below it choose that filename under **Source video**, so renaming a Clean 
 also updates downstream references. Generated files can be passed forward before
 they exist because jobs run in dependency order. A bookend may instead reference
 an absolute local video path, which ClipDesk copies into each project when the Flow
-runs. Server-local paths are intentionally unavailable in hosted multi-user mode.
+runs. A final **Save files** step can select one or several earlier outputs and
+copy them atomically to an absolute local or synced OneDrive folder, preserving
+existing files unless replacement is explicitly enabled. Server-local paths are
+intentionally unavailable in hosted multi-user mode.
 
 ### Outputs
 

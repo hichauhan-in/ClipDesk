@@ -1,6 +1,6 @@
 // Library: bring a recording in — by link or by upload — and pick up past work.
 
-import { api, uploadProject } from "../api.js";
+import { api, uploadProject, uploadProjects } from "../api.js";
 import { confirmAction, debounce, h, mount, toast } from "../dom.js";
 import { bytes, compactCount, duration, relativeTime } from "../format.js";
 import { createJobPanel } from "../jobpanel.js";
@@ -8,6 +8,7 @@ import { createJobPanel } from "../jobpanel.js";
 const STATUS_PILL = {
   ready: ["pill-good", "Ready"],
   analyzing: ["pill-warn", "Analysing"],
+  transcribed: ["pill-good", "Transcript ready"],
   downloading: ["pill-warn", "Downloading"],
   failed: ["pill-bad", "Failed"],
   new: ["pill-muted", "Not analysed"],
@@ -107,7 +108,7 @@ export async function renderLibrary(root, ctx) {
     h(
       "div.page-head",
       h("h1", "Library"),
-      h("div.sub", "Paste a link or upload a file, then let ClipDesk work out what is in it.")
+      h("div.sub", "Paste a link or upload files, then let ClipDesk work out what is in them.")
     ),
     jobPanel.el,
     importCard(ctx, jobPanel),
@@ -125,7 +126,7 @@ function importCard(ctx, jobPanel) {
 
   const modes = [
     ["link", "From a link", linkPane],
-    ["upload", "Upload a file", uploadPane],
+    ["upload", "Upload files", uploadPane],
     ["cloud", "From OneDrive", cloudPane],
   ];
 
@@ -177,6 +178,7 @@ function cloudPanel(ctx, jobPanel) {
   const listing = h("div");
   let root = null;
   let path = "";
+  const chosen = new Map();
 
   // Folders get deep, and a folder someone has just shared could be anywhere, so
   // clicking down to it is not a reasonable way to find a recording.
@@ -219,6 +221,7 @@ function cloudPanel(ctx, jobPanel) {
   function drawEntries(entries, { searched = "" } = {}) {
     const folders = entries.filter((entry) => entry.is_dir);
     const files = entries.filter((entry) => !entry.is_dir);
+    chosen.clear();
 
     if (!folders.length && !files.length) {
       mount(
@@ -234,15 +237,28 @@ function cloudPanel(ctx, jobPanel) {
       return;
     }
 
+    const batchButton = h(
+      "button.btn.btn-primary.btn-sm",
+      { disabled: true, onclick: () => importChosen() },
+      "Import & analyse selected"
+    );
+    const refreshBatch = () => {
+      batchButton.disabled = chosen.size === 0;
+      batchButton.textContent = chosen.size
+        ? `Import & analyse ${chosen.size} file${chosen.size === 1 ? "" : "s"}`
+        : "Import & analyse selected";
+    };
+
     mount(
       listing,
       searched
         ? h(
-            "div.faint.small",
+            "div.row-between",
             { style: { marginTop: "6px" } },
-            `${files.length} match(es) for “${searched}”`
+            h("div.faint.small", `${files.length} match(es) for “${searched}”`),
+            batchButton
           )
-        : null,
+        : h("div.row-between", h("div.faint.small", `${files.length} file(s)`), batchButton),
       h(
         "div.filelist",
         folders.map((entry) =>
@@ -256,8 +272,16 @@ function cloudPanel(ctx, jobPanel) {
         ),
         files.map((entry) =>
           h(
-            "button.filerow",
-            { onclick: () => pick(entry) },
+            "div.filerow",
+            h("input", {
+              type: "checkbox",
+              "aria-label": `Select ${entry.name}`,
+              onchange: (event) => {
+                if (event.target.checked) chosen.set(entry.path, entry);
+                else chosen.delete(entry.path);
+                refreshBatch();
+              },
+            }),
             h("span.fileicon", "▶"),
             h(
               "span",
@@ -270,11 +294,28 @@ function cloudPanel(ctx, jobPanel) {
                   (entry.cloud_only ? " · online only" : "")
               )
             ),
-            entry.cloud_only ? h("span.tag", "cloud") : null
+            entry.cloud_only ? h("span.tag", "cloud") : null,
+            h("button.btn.btn-sm", { onclick: () => pick(entry) }, "Import")
           )
         )
       )
     );
+  }
+
+  async function importChosen() {
+    const items = [...chosen.values()].map((entry) => ({
+      root: root.id,
+      path: entry.path,
+      title: "",
+    }));
+    if (!items.length) return;
+    try {
+      const started = await api.importLocalBatch(items);
+      toast(`${started.count} recordings queued for import and analysis.`, "ok");
+      ctx.navigate(`#/project/${started.project_id}`);
+    } catch (error) {
+      toast(error.message, "err");
+    }
   }
 
   function drawCrumbs() {
@@ -783,6 +824,26 @@ function linkPanel(ctx, jobPanel, onUseOneDrive) {
 
   async function importChosen(listing) {
     const picks = listing.items.filter((item) => chosen.has(item.url));
+    if (picks.length > 1) {
+      try {
+        const started = await api.importFromLinks(
+          picks.map((item) => ({
+            url: item.url,
+            title: item.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
+          }))
+        );
+        toast(`${started.count} recordings queued for import and analysis.`, "ok");
+        ctx.navigate(`#/project/${started.project_id}`);
+      } catch (error) {
+        if (needsReauthentication(error.message)) {
+          setSignInStatus("reauth", "The saved Microsoft session has expired.");
+          showAuthMethod("signin");
+        }
+        toast(error.message, "err");
+      }
+      return;
+    }
+
     let first = null;
     for (const item of picks) {
       try {
@@ -866,14 +927,21 @@ function linkPanel(ctx, jobPanel, onUseOneDrive) {
 }
 
 function uploadPanel(ctx) {
-  let videoFile = null;
-  let transcriptFile = null;
+  let videoFiles = [];
+  let transcriptFiles = [];
 
-  const videoLabel = h("div.muted.small", "No video chosen");
+  const videoLabel = h("div.upload-selection.muted.small", "No video chosen");
   const transcriptLabel = h("div.faint.small", "None — speech-to-text will be used");
   const titleInput = h("input", { type: "text", placeholder: "Optional — defaults to the filename" });
   const progressFill = h("i", { style: { width: "0%" } });
   const progressBar = h("div.bar", { style: { display: "none" } }, progressFill);
+  const progressText = h("div.faint.small", "Uploading 0%");
+  const progressHost = h(
+    "div.upload-progress",
+    { style: { display: "none" } },
+    progressText,
+    progressBar
+  );
   const startButton = h(
     "button.btn.btn-primary",
     { disabled: true, onclick: () => start() },
@@ -883,29 +951,47 @@ function uploadPanel(ctx) {
   const videoInput = h("input", {
     type: "file",
     accept: "video/*,audio/*",
+    multiple: true,
     style: { display: "none" },
-    onchange: (event) => setVideo(event.target.files[0]),
+    onchange: (event) => setVideos([...event.target.files]),
   });
   const transcriptInput = h("input", {
     type: "file",
     accept: ".srt,.vtt,.json",
+    multiple: true,
     style: { display: "none" },
-    onchange: (event) => setTranscript(event.target.files[0]),
+    onchange: (event) => setTranscripts([...event.target.files]),
   });
 
-  function setVideo(file) {
-    videoFile = file || null;
-    videoLabel.textContent = file ? `${file.name} · ${bytes(file.size)}` : "No video chosen";
-    videoLabel.className = file ? "small" : "muted small";
-    startButton.disabled = !file;
+  function setVideos(files) {
+    videoFiles = files.filter(Boolean);
+    mount(
+      videoLabel,
+      videoFiles.length
+        ? videoFiles.map((file) =>
+            h(
+              "div.upload-file-row",
+              h("span.upload-file-mark", "VID"),
+              h("span.upload-file-name", file.name),
+              h("span.faint.small", bytes(file.size))
+            )
+          )
+        : "No video chosen"
+    );
+    videoLabel.className = videoFiles.length ? "upload-selection selected" : "upload-selection muted small";
+    drop.classList.toggle("has-file", videoFiles.length > 0);
+    startButton.disabled = videoFiles.length === 0;
+    startButton.textContent = videoFiles.length > 1
+      ? `Upload and analyse ${videoFiles.length} files`
+      : "Upload and analyse";
   }
 
-  function setTranscript(file) {
-    transcriptFile = file || null;
-    transcriptLabel.textContent = file
-      ? `${file.name} · speech-to-text will be skipped`
+  function setTranscripts(files) {
+    transcriptFiles = files.filter(Boolean);
+    transcriptLabel.textContent = transcriptFiles.length
+      ? `${transcriptFiles.map((file) => file.name).join(", ")} · matched by filename`
       : "None — speech-to-text will be used";
-    transcriptLabel.className = file ? "small" : "faint small";
+    transcriptLabel.className = transcriptFiles.length ? "small" : "faint small";
   }
 
   const drop = h(
@@ -921,9 +1007,11 @@ function uploadPanel(ctx) {
         event.preventDefault();
         drop.classList.remove("over");
         for (const file of event.dataTransfer.files) {
-          if (/\.(srt|vtt|json)$/i.test(file.name)) setTranscript(file);
-          else setVideo(file);
+          if (/\.(srt|vtt|json)$/i.test(file.name)) transcriptFiles.push(file);
+          else videoFiles.push(file);
         }
+        setVideos(videoFiles);
+        setTranscripts(transcriptFiles);
       },
     },
     h("strong", "Drop a video here, or click to choose"),
@@ -932,25 +1020,37 @@ function uploadPanel(ctx) {
   );
 
   async function start() {
-    if (!videoFile) return;
+    if (!videoFiles.length) return;
     startButton.disabled = true;
     startButton.textContent = "Uploading…";
+    progressHost.style.display = "";
     progressBar.style.display = "";
 
     try {
-      const project = await uploadProject(
-        { video: videoFile, transcript: transcriptFile, title: titleInput.value },
-        (fraction) => {
-          progressFill.style.width = `${fraction * 100}%`;
-        }
-      );
-      toast("Uploaded. Starting analysis…", "ok");
-      ctx.navigate(`#/project/${project.id}?autostart=1`);
+      const onProgress = (fraction) => {
+        progressFill.style.width = `${fraction * 100}%`;
+        progressText.textContent = `Uploading ${Math.round(fraction * 100)}%`;
+      };
+      if (videoFiles.length === 1) {
+        const project = await uploadProject(
+          { video: videoFiles[0], transcript: transcriptFiles[0] || null, title: titleInput.value },
+          onProgress
+        );
+        toast("Uploaded. Starting analysis…", "ok");
+        ctx.navigate(`#/project/${project.id}?autostart=1`);
+      } else {
+        const batch = await uploadProjects(
+          { videos: videoFiles, transcripts: transcriptFiles, title: titleInput.value },
+          onProgress
+        );
+        toast(`${batch.count} recordings uploaded and queued for analysis.`, "ok");
+        ctx.navigate(`#/project/${batch.project_id}`);
+      }
     } catch (error) {
       toast(error.message, "err");
       startButton.disabled = false;
       startButton.textContent = "Upload and analyse";
-      progressBar.style.display = "none";
+      progressHost.style.display = "none";
     }
   }
 
@@ -969,7 +1069,7 @@ function uploadPanel(ctx) {
         h(
           "div.row",
           h("button.btn.btn-sm", { onclick: () => transcriptInput.click() }, "Choose .srt / .vtt"),
-          h("button.btn.btn-sm.btn-ghost", { onclick: () => setTranscript(null) }, "Clear")
+          h("button.btn.btn-sm.btn-ghost", { onclick: () => setTranscripts([]) }, "Clear")
         ),
         h("div", { style: { marginTop: "6px" } }, transcriptLabel)
       )
@@ -983,7 +1083,7 @@ function uploadPanel(ctx) {
         "Teams, Stream and Zoom recordings usually ship a .vtt — using it makes this near-instant."
       )
     ),
-    progressBar
+    progressHost
   );
 }
 

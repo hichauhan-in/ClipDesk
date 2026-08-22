@@ -222,6 +222,8 @@ label.field, .field { display: block; }
 label.field > span, .field > span { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 5px; }
 .disabled-field { opacity: 0.42; }
 .disabled-field input { cursor: not-allowed; }
+.transcript-chip { cursor: copy; }
+.transcript-chip:hover { border-color: var(--accent-dim); color: var(--text); }
 input[type="text"], input[type="number"], input[type="url"], input[type="search"],
 select, textarea {
   width: 100%; background: var(--bg-input); border: 1px solid var(--border);
@@ -327,6 +329,23 @@ tbody tr:hover { background: #171c27; }
 }
 .drop:hover, .drop.over { border-color: var(--accent-dim); background: #151b28; }
 .drop strong { display: block; margin-bottom: 4px; }
+.drop.has-file { border-style: solid; border-color: #315d9d; background: #121b2a; }
+.upload-selection { margin-top: 12px; }
+.upload-selection.selected {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  border: 1px solid #315d9d; border-radius: var(--radius-sm);
+  background: #17243a; text-align: left;
+}
+.upload-file-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 9px; padding: 3px 4px;
+}
+.upload-file-mark {
+  padding: 2px 5px; border-radius: 3px; background: var(--accent-dim);
+  color: #eef5ff; font: 10px/1.4 var(--mono);
+}
+.upload-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.upload-progress { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; }
 
 /* --- project --- */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
@@ -725,6 +744,7 @@ button.choice .row { gap: 8px; flex-wrap: wrap; }
 .flow-fields { display: flex; flex-direction: column; gap: 10px; }
 .flow-checks { display: flex; flex-wrap: wrap; gap: 7px 16px; }
 .flow-optional { display: flex; flex-direction: column; gap: 7px; }
+.flow-save-files { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 7px 14px; }
 .flow-add {
   border-top: 1px solid var(--border); margin-top: 13px; padding-top: 13px;
   align-items: stretch;

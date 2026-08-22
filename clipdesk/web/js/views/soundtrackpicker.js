@@ -1,16 +1,21 @@
-// A soundtrack picker you can listen to before committing.
-//
-// A native <select> cannot hold a button, so this is a listbox that behaves like
-// one: it reports a value, but every row also carries its own play control and
-// only one track is ever audible.
+// A buffered soundtrack picker with gapless preview switching.
 
 import { h, mount } from "../dom.js";
 
+const CROSSFADE_SECONDS = 0.3;
+const PREWARM_CONCURRENCY = 2;
+
 export function createSoundtrackPicker({ onChange } = {}) {
-  const audio = new Audio();
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const encoded = new Map();
+  const decoded = new Map();
+  const prewarmQueue = [];
+  let prewarming = 0;
+  let context = null;
+  let active = null;
   let value = "";
   let playingId = "";
-  let playbackToken = 0;
+  let requestToken = 0;
   let rows = [];
 
   const label = h("span.soundtrack-value", "Choose a soundtrack");
@@ -28,20 +33,110 @@ export function createSoundtrackPicker({ onChange } = {}) {
   );
   const root = h("div.soundtrack-picker", toggle, list);
 
-  function setOpen(open) {
-    list.hidden = !open;
-    toggle.setAttribute("aria-expanded", String(open));
-    if (!open) stop();
+  function ensureContext() {
+    if (!context && AudioContextClass) context = new AudioContextClass();
+    return context;
   }
 
-  function stop() {
-    playbackToken += 1;
-    audio.pause();
-    audio.currentTime = 0;
-    audio.removeAttribute("src");
-    audio.load();
+  function previewUrl(id) {
+    return `/api/intro/audio/preview?audio_id=${encodeURIComponent(id)}`;
+  }
+
+  function fetchPreview(id) {
+    if (!encoded.has(id)) {
+      encoded.set(
+        id,
+        fetch(previewUrl(id), { cache: "force-cache" })
+          .then((response) => {
+            if (!response.ok) throw new Error(`Preview failed (${response.status})`);
+            return response.arrayBuffer();
+          })
+          .catch((error) => {
+            encoded.delete(id);
+            throw error;
+          })
+      );
+    }
+    return encoded.get(id);
+  }
+
+  async function decodePreview(id) {
+    if (!decoded.has(id)) {
+      const audioContext = ensureContext();
+      if (!audioContext) throw new Error("Audio previews are not supported by this browser.");
+      decoded.set(
+        id,
+        fetchPreview(id)
+          .then((bytes) => audioContext.decodeAudioData(bytes.slice(0)))
+          .catch((error) => {
+            decoded.delete(id);
+            throw error;
+          })
+      );
+    }
+    return decoded.get(id);
+  }
+
+  function queuePrewarm(id) {
+    if (encoded.has(id) || prewarmQueue.includes(id)) return;
+    prewarmQueue.push(id);
+    pumpPrewarm();
+  }
+
+  function pumpPrewarm() {
+    while (prewarming < PREWARM_CONCURRENCY && prewarmQueue.length) {
+      const id = prewarmQueue.shift();
+      prewarming += 1;
+      fetchPreview(id)
+        .catch(() => {})
+        .finally(() => {
+          prewarming -= 1;
+          pumpPrewarm();
+        });
+    }
+  }
+
+  function setOpen(open) {
+    const wasOpen = !list.hidden;
+    list.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    if (wasOpen && !open) stop();
+  }
+
+  function resetIcons() {
+    for (const row of rows) {
+      if (row.button instanceof HTMLButtonElement) {
+        row.button.textContent = row.id === playingId ? "■" : "▶";
+        row.button.removeAttribute("aria-busy");
+      }
+    }
+  }
+
+  function retire(channel, delayMs = 0) {
+    if (!channel) return;
+    window.setTimeout(() => {
+      try {
+        channel.source.stop();
+      } catch {
+        // It may already have ended naturally.
+      }
+      channel.source.disconnect();
+      channel.gain.disconnect();
+    }, delayMs);
+  }
+
+  function stop({ fade = true } = {}) {
+    requestToken += 1;
     playingId = "";
-    for (const row of rows) row.button.textContent = "▶";
+    resetIcons();
+    if (!active || !context) return;
+    const previous = active;
+    active = null;
+    const now = context.currentTime;
+    previous.gain.gain.cancelScheduledValues(now);
+    previous.gain.gain.setValueAtTime(previous.gain.gain.value, now);
+    previous.gain.gain.linearRampToValueAtTime(0, now + (fade ? 0.12 : 0.01));
+    retire(previous, fade ? 150 : 20);
   }
 
   async function play(item, button) {
@@ -49,23 +144,56 @@ export function createSoundtrackPicker({ onChange } = {}) {
       stop();
       return;
     }
-    stop();
-    const token = playbackToken;
+
+    const audioContext = ensureContext();
+    if (!audioContext) return;
+    const token = ++requestToken;
     playingId = item.id;
-    button.textContent = "■";
-    audio.src = `/api/intro/audio/preview?audio_id=${encodeURIComponent(item.id)}`;
-    audio.load();
+    resetIcons();
+    button.textContent = "…";
+    button.setAttribute("aria-busy", "true");
+
+    // Resume inside the click turn so autoplay policy sees user intent.
+    const resume = audioContext.state === "suspended" ? audioContext.resume() : Promise.resolve();
     try {
-      await audio.play();
+      const [, buffer] = await Promise.all([resume, decodePreview(item.id)]);
+      if (token !== requestToken || playingId !== item.id) return;
+
+      const source = audioContext.createBufferSource();
+      const gain = audioContext.createGain();
+      source.buffer = buffer;
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+
+      const previous = active;
+      const now = audioContext.currentTime;
+      gain.gain.setValueAtTime(0, now);
+      source.start(now);
+      gain.gain.linearRampToValueAtTime(1, now + (previous ? CROSSFADE_SECONDS : 0.08));
+      active = { id: item.id, source, gain };
+
+      if (previous) {
+        previous.gain.gain.cancelScheduledValues(now);
+        previous.gain.gain.setValueAtTime(previous.gain.gain.value, now);
+        previous.gain.gain.linearRampToValueAtTime(0, now + CROSSFADE_SECONDS);
+        retire(previous, (CROSSFADE_SECONDS + 0.05) * 1000);
+      }
+
+      source.onended = () => {
+        if (active?.source !== source) return;
+        active = null;
+        playingId = "";
+        resetIcons();
+      };
+      resetIcons();
     } catch {
-      if (token === playbackToken) stop();
+      if (token === requestToken) stop({ fade: false });
     }
   }
 
-  audio.onended = () => stop();
-
   function draw(groups) {
     rows = [];
+    const playable = groups.flatMap((group) => group.items).filter((item) => item.previewable !== false);
     mount(
       list,
       groups.map((group) =>
@@ -81,6 +209,8 @@ export function createSoundtrackPicker({ onChange } = {}) {
                     type: "button",
                     title: `Hear ${item.name}`,
                     "aria-label": `Hear ${item.name}`,
+                    onpointerenter: () => queuePrewarm(item.id),
+                    onfocus: () => queuePrewarm(item.id),
                     onclick: (event) => {
                       event.stopPropagation();
                       play(item, button);
@@ -116,6 +246,11 @@ export function createSoundtrackPicker({ onChange } = {}) {
       )
     );
     markSelection();
+
+    // Prepare cold server/browser caches quietly. Two-at-a-time avoids saturating
+    // disk or network while making later clicks immediate.
+    const schedule = window.requestIdleCallback || ((callback) => window.setTimeout(callback, 250));
+    schedule(() => playable.forEach((item) => queuePrewarm(item.id)));
   }
 
   function markSelection() {
@@ -137,9 +272,8 @@ export function createSoundtrackPicker({ onChange } = {}) {
     onChange?.(value);
   }
 
-  // Clicking elsewhere closes the list, which also stops whatever is playing.
   document.addEventListener("click", (event) => {
-    if (!root.contains(event.target)) setOpen(false);
+    if (!root.contains(event.target) && !list.hidden) setOpen(false);
   });
 
   return {

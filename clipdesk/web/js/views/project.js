@@ -179,6 +179,16 @@ export async function renderProject(root, ctx, projectId, params) {
   }
 }
 
+async function copyCheckpointTranscript(project) {
+  try {
+    const text = await api.transcriptCheckpoint(project.id);
+    await navigator.clipboard.writeText(text);
+    toast(`Full transcript copied (${project.transcript_segments || "all"} segments).`, "ok");
+  } catch (error) {
+    toast(error.message || "Could not copy the transcript.", "err");
+  }
+}
+
 function header(project, analysis, ctx) {
   return h(
     "div.page-head",
@@ -194,12 +204,17 @@ function header(project, analysis, ctx) {
           h("span", duration(project.duration_s)),
           h("span.faint", "·"),
           h("span", bytes(project.size_bytes)),
-          analysis?.transcript?.source
+          project.transcript_available
             ? h(
-                "span.tag",
-                analysis.transcript.source === "uploaded"
+                "button.tag.transcript-chip",
+                {
+                  type: "button",
+                  title: "Copy the full transcript",
+                  onclick: () => copyCheckpointTranscript(project),
+                },
+                project.transcript_source === "uploaded"
                   ? "transcript supplied"
-                  : `transcribed (${analysis.transcript.model || "whisper"})`
+                  : `transcribed (${project.transcript_model || "whisper"})`
               )
             : null
         )
@@ -226,10 +241,14 @@ function header(project, analysis, ctx) {
 function startAnalysis(project, jobPanel, ctx, options = {}) {
   jobPanel.run(api.analyze(project.id, { skip_llm: false, ...options }), {
     title: "Analysing",
+    onEvent: (event) => {
+      if (event.data?.transcript_ready) ctx.refresh();
+    },
     onDone: () => {
       toast("Analysis finished.", "ok");
       ctx.refresh();
     },
+    onError: () => ctx.refresh(),
   });
 }
 
@@ -251,6 +270,8 @@ function overviewTab(project, analysis, jobPanel, ctx) {
         "p.muted",
         project.status === "failed"
           ? `The last attempt failed: ${project.error}`
+          : project.status === "transcribed"
+            ? "The transcript is ready and can be copied from the badge above. Continue to build chapters, cleanup decisions, highlights and summaries without transcribing again."
           : "Extract the transcript and work out what is in this recording. " +
             "Everything else is built from the result."
       ),
@@ -259,7 +280,7 @@ function overviewTab(project, analysis, jobPanel, ctx) {
         h(
           "button.btn.btn-primary",
           { onclick: () => startAnalysis(project, jobPanel, ctx) },
-          "Analyse"
+          project.status === "transcribed" ? "Continue analysis" : "Analyse"
         ),
         h(
           "button.btn",

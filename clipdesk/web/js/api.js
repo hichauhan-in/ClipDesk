@@ -57,6 +57,7 @@ export const api = {
   listProjects: () => request("/api/projects"),  getProject: (id) => request(`/api/projects/${id}`),
   deleteProject: (id) => request(`/api/projects/${id}`, { method: "DELETE" }),
   getAnalysis: (id) => request(`/api/projects/${id}/analysis`),
+  transcriptCheckpoint: (id) => request(`/api/projects/${id}/transcript/checkpoint`),
 
   inspectLink: (url) => request("/api/links/inspect", { method: "POST", body: { url } }),
   browseLink: (url) => request("/api/links/browse", { method: "POST", body: { url } }),
@@ -67,7 +68,11 @@ export const api = {
   searchSource: (rootId, query) =>
     request(`/api/sources/${encodeURIComponent(rootId)}/search?q=${encodeURIComponent(query)}`),
   importLocal: (body) => request("/api/projects/from-local", { method: "POST", body }),
+  importLocalBatch: (items) =>
+    request("/api/projects/from-local/batch", { method: "POST", body: { items } }),
   importFromLink: (body) => request("/api/projects/from-link", { method: "POST", body }),
+  importFromLinks: (items) =>
+    request("/api/projects/from-links", { method: "POST", body: { items } }),
 
   analyze: (id, body) => request(`/api/projects/${id}/analyze`, { method: "POST", body }),
   notes: (id, body) => request(`/api/projects/${id}/notes`, { method: "POST", body }),
@@ -216,6 +221,35 @@ export function uploadProject({ video, transcript, title }, onProgress) {
   });
 }
 
+export function uploadProjects({ videos, transcripts = [], title = "" }, onProgress) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    for (const video of videos) form.append("videos", video);
+    for (const transcript of transcripts) form.append("transcripts", transcript);
+    form.append("title", title);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/projects/batch");
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total);
+    });
+    xhr.addEventListener("load", () => {
+      let payload = {};
+      try {
+        payload = JSON.parse(xhr.responseText || "{}");
+      } catch {
+        /* status handling below */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+      else reject(new ApiError(payload.detail || `Batch upload failed (${xhr.status})`, xhr.status));
+    });
+    xhr.addEventListener("error", () =>
+      reject(new ApiError("The batch upload was interrupted.", 0))
+    );
+    xhr.send(form);
+  });
+}
+
 export function uploadAsset(projectId, file, onProgress) {
   return new Promise((resolve, reject) => {
     const form = new FormData();
@@ -263,7 +297,7 @@ export function uploadIntroAudio(file, onProgress) {
  * Follow a job to completion, streaming events over a WebSocket and falling
  * back to polling if the socket cannot be opened (some corporate proxies).
  */
-export function followJob(jobId, { onEvent, onDone, onError } = {}) {
+export function followJob(jobId, { onEvent, onDone, onError, onCancelled } = {}) {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   let socket;
   let closed = false;
@@ -276,7 +310,8 @@ export function followJob(jobId, { onEvent, onDone, onError } = {}) {
     } catch {
       /* already closing */
     }
-    if (status === "failed" || error) onError?.(error || "The job failed.");
+    if (status === "cancelled") onCancelled?.();
+    else if (status === "failed" || error) onError?.(error || "The job failed.");
     else onDone?.(result || {});
   };
 
@@ -327,7 +362,7 @@ export function followJob(jobId, { onEvent, onDone, onError } = {}) {
       }
       for (const event of job.events.slice(seen)) onEvent?.(event);
       seen = job.events.length;
-      if (job.status === "done" || job.status === "failed") {
+      if (["done", "failed", "cancelled"].includes(job.status)) {
         finish(job.status, job.result, job.error);
         return;
       }

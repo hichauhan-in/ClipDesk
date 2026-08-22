@@ -7,6 +7,7 @@ is most of the value here; the route checks are the guards worth pinning down.
 """
 
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -416,6 +417,133 @@ def test_outro_job_uses_title_cards_and_analysis_defaults(client, monkeypatch):
     assert artifact["filename"] == "closer.mp4"
 
 
+def test_back_to_back_intro_and_outro_jobs_preserve_both_outputs(client, monkeypatch):
+    from clipdesk.server import app as app_module
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("silent.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "probe",
+        lambda *args, **kwargs: SimpleNamespace(duration_s=60.0, has_audio=False),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "prepare_soundtrack",
+        lambda _audio, _duration, destination, _ffmpeg, **_kwargs: (
+            destination.write_bytes(b"audio"), destination
+        )[1],
+    )
+    intro_started = threading.Event()
+    release_intro = threading.Event()
+    render_order = []
+
+    def fake_render(_source, destination, _plan, **_kwargs):
+        render_order.append(destination.name)
+        if destination.name == "intro.mp4":
+            intro_started.set()
+            assert release_intro.wait(2)
+        destination.write_bytes(destination.stem.encode())
+        return destination
+
+    monkeypatch.setattr(app_module, "render_intro", fake_render)
+
+    intro_response = client.post(
+        f"/api/projects/{project_payload['id']}/intro",
+        json={"audio_id": "none"},
+    )
+    assert intro_response.status_code == 200
+    assert intro_started.wait(2)
+    outro_response = client.post(
+        f"/api/projects/{project_payload['id']}/outro",
+        json={"audio_id": "none"},
+    )
+    assert outro_response.status_code == 200
+    release_intro.set()
+
+    jobs = [
+        state.jobs.get(intro_response.json()["job_id"]),
+        state.jobs.get(outro_response.json()["job_id"]),
+    ]
+    for job in jobs:
+        assert job.finished.wait(3)
+        assert job.status == "done", job.error
+
+    reloaded = state.store.require(project_payload["id"])
+    artifacts = {
+        (item["kind"], item["filename"])
+        for item in reloaded.meta.artifacts
+        if item["kind"] in {"intro", "outro"}
+    }
+    assert render_order == ["intro.mp4", "outro.mp4"]
+    assert artifacts == {("intro", "intro.mp4"), ("outro", "outro.mp4")}
+    assert reloaded.output_path("intro.mp4").read_bytes() == b"intro"
+    assert reloaded.output_path("outro.mp4").read_bytes() == b"outro"
+
+
+def test_active_jobs_cannot_overwrite_the_same_output(client, monkeypatch):
+    from clipdesk.server import app as app_module
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("silent.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "probe",
+        lambda *args, **kwargs: SimpleNamespace(duration_s=60.0, has_audio=False),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "prepare_soundtrack",
+        lambda _audio, _duration, destination, _ffmpeg, **_kwargs: (
+            destination.write_bytes(b"audio"), destination
+        )[1],
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_render(_source, destination, _plan, **_kwargs):
+        started.set()
+        assert release.wait(2)
+        destination.write_bytes(b"video")
+        return destination
+
+    monkeypatch.setattr(app_module, "render_intro", fake_render)
+    first = client.post(
+        f"/api/projects/{project_payload['id']}/intro",
+        json={"audio_id": "none", "output_name": "shared.mp4"},
+    )
+    assert first.status_code == 200
+    assert started.wait(2)
+
+    conflict = client.post(
+        f"/api/projects/{project_payload['id']}/outro",
+        json={"audio_id": "none", "output_name": "shared.mp4"},
+    )
+    release.set()
+
+    assert conflict.status_code == 409
+    assert "already writes 'shared.mp4'" in conflict.json()["detail"]
+    first_job = state.jobs.get(first.json()["job_id"])
+    assert first_job.finished.wait(3)
+    assert first_job.status == "done"
+
+
 def test_queued_assembly_accepts_bookends_from_earlier_steps(client, monkeypatch):
     from clipdesk.server import app as app_module
     from clipdesk.actions.intro import BUILT_IN_STYLES
@@ -527,6 +655,92 @@ def test_short_intro_fits_overview_voiceover_to_total_duration(client, monkeypat
     artifact = state.store.get(project.id).meta.artifacts[-1]
     assert artifact["duration_s"] == pytest.approx(6.0, abs=0.05)
     assert len(artifact["meta"]["narration"].split()) <= 12
+
+
+def test_transcript_checkpoint_is_exposed_before_analysis_finishes(client):
+    from clipdesk.models import Transcript, TranscriptSegment
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("meeting.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    project = state.store.require(project_payload["id"])
+    project.save_transcript_checkpoint(
+        Transcript(
+            model="base",
+            duration_s=12.0,
+            segments=[
+                TranscriptSegment(
+                    id=0, start=1.0, end=4.0, speaker="Alice", text="Checkpoint text."
+                )
+            ],
+        )
+    )
+
+    payload = client.get(f"/api/projects/{project.id}").json()
+    copied = client.get(f"/api/projects/{project.id}/transcript/checkpoint")
+
+    assert payload["status"] == "transcribed"
+    assert payload["transcript_available"] is True
+    assert payload["transcript_segments"] == 1
+    assert copied.status_code == 200
+    assert copied.text == "00:00:01 Alice: Checkpoint text.\n"
+
+
+def test_cancelling_after_transcription_keeps_the_checkpoint(client, monkeypatch):
+    from clipdesk.models import Transcript, TranscriptSegment
+    from clipdesk.server import app as app_module
+
+    project_payload = client.post(
+        "/api/projects",
+        files={"video": ("meeting.mp4", b"video", "video/mp4")},
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    checkpoint_saved = threading.Event()
+    monkeypatch.setattr(
+        state,
+        "ffmpeg",
+        lambda: SimpleNamespace(ffprobe="ffprobe", ffmpeg="ffmpeg"),
+    )
+
+    def fake_analyze(project, _settings, bus, **_kwargs):
+        project.save_transcript_checkpoint(
+            Transcript(
+                model="base",
+                duration_s=12.0,
+                segments=[
+                    TranscriptSegment(id=0, start=0.0, end=3.0, text="Keep this transcript.")
+                ],
+            )
+        )
+        bus.stage_end("checkpoint", "Transcript ready", transcript_ready=True)
+        checkpoint_saved.set()
+        while True:
+            bus.progress("analysis", None, "Waiting for the model")
+            threading.Event().wait(0.01)
+
+    monkeypatch.setattr(app_module, "analyze_project", fake_analyze)
+    response = client.post(
+        f"/api/projects/{project_payload['id']}/analyze",
+        json={"skip_llm": True},
+    )
+    job_id = response.json()["job_id"]
+    assert checkpoint_saved.wait(2)
+
+    cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+    job = state.jobs.get(job_id)
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["cancelled"] is True
+    assert job.finished.wait(2)
+    assert job.status == "cancelled"
+    project = client.get(f"/api/projects/{project_payload['id']}").json()
+    assert project["status"] == "transcribed"
+    assert project["transcript_available"] is True
+    assert "Keep this transcript." in client.get(
+        f"/api/projects/{project_payload['id']}/transcript/checkpoint"
+    ).text
 
 
 def test_output_can_be_renamed_through_the_api(client):

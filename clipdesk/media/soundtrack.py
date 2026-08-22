@@ -6,6 +6,8 @@ moments is incoherent — so every intro gets a bed from here.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -206,7 +208,7 @@ def resolve_audio(state_dir: Path, audio_id: str) -> Path:
     return destination
 
 
-PREVIEW_SECONDS = 7.0
+PREVIEW_SECONDS = 12.0
 
 
 def preview_audio(state_dir: Path, audio_id: str, ffmpeg_bin: str) -> Path:
@@ -217,23 +219,49 @@ def preview_audio(state_dir: Path, audio_id: str, ffmpeg_bin: str) -> Path:
     """
     cache = audio_dir(state_dir) / ".previews"
     cache.mkdir(parents=True, exist_ok=True)
-    source = resolve_audio(state_dir, audio_id)
     if audio_id.startswith("imported:"):
+        source: str | Path = resolve_audio(state_dir, audio_id)
         stamp = int(source.stat().st_mtime)
-        destination = cache / f"imported-{source.stem}-{stamp}.mp3"
+        destination = cache / f"imported-{source.stem}-{stamp}-{PREVIEW_SECONDS:g}s.mp3"
+        loop_args = ["-stream_loop", "-1"]
     else:
-        destination = cache / f"{audio_id}.mp3"
+        item = next((track for track in BUILT_IN_AUDIO if track["id"] == audio_id), None)
+        if item is None:
+            raise ValueError(f"No intro/outro soundtrack named '{audio_id}'.")
+        source = _public_track(item)["source_url"]
+        destination = cache / f"{audio_id}-{PREVIEW_SECONDS:g}s.mp3"
+        loop_args = []
     if destination.is_file():
         return destination
 
-    scratch = destination.with_suffix(".tmp.wav")
-    prepare_soundtrack(
-        audio_id, PREVIEW_SECONDS, scratch, ffmpeg_bin, imported=source
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".preview-", suffix=".tmp.mp3", dir=cache
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    fade_out = PREVIEW_SECONDS - 1.0
+    filters = (
+        "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        "loudnorm=I=-20:TP=-2:LRA=7,"
+        "afade=t=in:st=0:d=0.5,"
+        f"afade=t=out:st={fade_out:.3f}:d=1"
     )
     try:
-        run(ffmpeg_bin, ["-i", str(scratch), "-c:a", "libmp3lame", "-q:a", "5", "-y", str(destination)])
+        run(
+            ffmpeg_bin,
+            [
+                *loop_args,
+                "-i", str(source),
+                "-t", f"{PREVIEW_SECONDS:.3f}",
+                "-af", filters,
+                "-c:a", "libmp3lame", "-q:a", "5",
+                "-y", str(temporary),
+            ],
+            timeout=60.0,
+        )
+        temporary.replace(destination)
     finally:
-        scratch.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
     return destination
 
 
