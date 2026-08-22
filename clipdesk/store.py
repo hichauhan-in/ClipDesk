@@ -21,6 +21,7 @@ import tempfile
 import threading
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,8 @@ class ProjectMeta:
     transcript_filename: str = ""
     #: Where it came from, when it was imported from a link rather than uploaded.
     source_url: str = ""
+    #: True once someone renamed this by hand, so nothing generated may override it.
+    title_custom: bool = False
     error: str = ""
     #: Tokens spent on this recording, accumulated across every action.
     tokens: dict[str, Any] = field(default_factory=dict)
@@ -82,6 +85,7 @@ class ProjectMeta:
             "has_uploaded_transcript": self.has_uploaded_transcript,
             "transcript_filename": self.transcript_filename,
             "source_url": self.source_url,
+            "title_custom": self.title_custom,
             "error": self.error,
             "tokens": self.tokens,
             "artifacts": self.artifacts,
@@ -101,6 +105,7 @@ class ProjectMeta:
             has_uploaded_transcript=bool(data.get("has_uploaded_transcript", False)),
             transcript_filename=str(data.get("transcript_filename", "")),
             source_url=str(data.get("source_url", "")),
+            title_custom=bool(data.get("title_custom", False)),
             error=str(data.get("error", "")),
             tokens=dict(data.get("tokens") or {}),
             artifacts=list(data.get("artifacts") or []),
@@ -203,10 +208,16 @@ class Project:
             temporary.replace(self.analysis_path)
         finally:
             temporary.unlink(missing_ok=True)
-        self.meta.status = "ready"
-        self.meta.title = report.title or self.meta.title
-        self.meta.duration_s = report.media.duration_s
-        self.save()
+        with self._lock:
+            # A rename that happened while this analysis was running lives in
+            # project.json, not in the snapshot this job started with — so read it
+            # back before writing, and never talk over a title someone chose.
+            self._refresh_meta_locked()
+            self.meta.status = "ready"
+            if not self.meta.title_custom:
+                self.meta.title = report.title or self.meta.title
+            self.meta.duration_s = report.media.duration_s
+            self._save_locked()
         return self.analysis_path
 
     def load_analysis(self) -> AnalysisReport | None:
@@ -262,8 +273,31 @@ class Project:
         with self._lock:
             self._refresh_meta_locked()
             self.meta.title = clean
+            self.meta.title_custom = True
             self._save_locked()
         return clean
+
+    def record_media(self, duration_s: float, size_bytes: int) -> None:
+        """Save what probing the video found, without clobbering a fresh rename."""
+        with self._lock:
+            self._refresh_meta_locked()
+            self.meta.duration_s = duration_s
+            self.meta.size_bytes = size_bytes
+            self._save_locked()
+
+    def record_download(
+        self, *, source_filename: str = "", size_bytes: int = 0, title: str = ""
+    ) -> None:
+        """Save what an import produced, leaving a hand-picked title alone."""
+        with self._lock:
+            self._refresh_meta_locked()
+            if source_filename:
+                self.meta.source_filename = source_filename
+            self.meta.size_bytes = size_bytes
+            self.meta.status = "new"
+            if title and not self.meta.title_custom:
+                self.meta.title = title
+            self._save_locked()
 
     # --- artifacts ---------------------------------------------------------
     def add_artifact(
@@ -404,12 +438,48 @@ class ProjectStore:
             raise KeyError(f"No project with id {project_id!r}")
         return project
 
+    def _adopt_orphan(self, root: Path) -> Project | None:
+        """Rebuild metadata for a project folder whose project.json went missing.
+
+        Deleting a project removes its whole folder, so a folder that still holds
+        a recording is one nobody chose to lose. Rather than hiding it forever,
+        take the details back off the disk.
+        """
+        if not _SAFE_ID_RE.match(root.name):
+            return None
+        source = next(
+            (item for item in sorted((root / "source").glob("*")) if item.is_file()),
+            None,
+        )
+        if source is None:
+            return None
+        # The folder's own age, so a recovered project sorts where it belongs
+        # rather than jumping to the top of the list.
+        created = datetime.fromtimestamp(root.stat().st_ctime, tz=timezone.utc).isoformat()
+        project = Project(
+            root,
+            ProjectMeta(
+                id=root.name,
+                title=source.stem.replace("_", " "),
+                source_filename=source.name,
+                created_at=created,
+                updated_at=created,
+                size_bytes=source.stat().st_size,
+            ),
+        )
+        if project.analysis_path.is_file():
+            project.meta.status = "ready"
+        elif project.transcript_checkpoint_path.is_file():
+            project.meta.status = "transcribed"
+        project.save()
+        return project
+
     def list(self) -> list[ProjectMeta]:
         projects: list[ProjectMeta] = []
         for entry in self.workspace.iterdir():
             if not entry.is_dir():
                 continue
-            project = self.get(entry.name)
+            project = self.get(entry.name) or self._adopt_orphan(entry)
             if project is not None:
                 projects.append(project.meta)
         projects.sort(key=lambda meta: meta.created_at, reverse=True)

@@ -124,7 +124,7 @@ async function drawNav(parts, generation = routeGeneration) {
       onclick: () => ctx.navigate("#/settings"),
     }),
     projects.length ? h("div.nav-group", "Recent") : null,
-    projects.slice(0, 10).map((project) => {
+    projects.map((project) => {
       const current = parts[0] === "project" && parts[1] === project.id;
       const name = project.title || project.source_filename;
       const row = h(

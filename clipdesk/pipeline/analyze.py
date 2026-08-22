@@ -35,18 +35,14 @@ def analyze_project(
     if not source.is_file():
         raise FileNotFoundError(f"The uploaded video is missing: {source}")
 
-    project.meta.status = "analyzing"
-    project.meta.error = ""
-    project.save()
+    project.set_status("analyzing")
 
     warnings: list[str] = []
 
     # 1. What are we working with?
     bus.stage_start("probe", f"Reading {source.name}")
     media = probe(source, tools.ffprobe)
-    project.meta.duration_s = media.duration_s
-    project.meta.size_bytes = media.size_bytes
-    project.save()
+    project.record_media(media.duration_s, media.size_bytes)
     bus.stage_end(
         "probe",
         f"{media.duration_s / 60:.1f} minutes"

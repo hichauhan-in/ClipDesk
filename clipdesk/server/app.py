@@ -1417,14 +1417,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     lambda fraction, message: bus.progress(stage, fraction, message),
                 )
             except BrowseError as exc:
-                project.meta.status = "failed"
-                project.meta.error = str(exc)
-                project.save()
+                project.set_status("failed", str(exc))
                 raise RuntimeError(str(exc)) from exc
 
-            project.meta.size_bytes = written
-            project.meta.status = "new"
-            project.save()
+            project.record_download(size_bytes=written)
             bus.stage_end(stage, f"Copied {written / 1e6:.0f} MB")
             return {"project_id": project.id, "file": filename, "size_bytes": written}
 
@@ -1549,17 +1545,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     youtube_clients=settings.ingest.youtube_player_clients,
                 )
             except FetchError as exc:
-                project.meta.status = "failed"
-                project.meta.error = str(exc)
-                project.save()
+                project.set_status("failed", str(exc))
                 raise RuntimeError(str(exc)) from exc
 
-            project.meta.source_filename = result.path.name
-            project.meta.size_bytes = result.bytes_written
-            project.meta.status = "new"
-            if not title:
-                project.meta.title = result.path.stem.replace("_", " ")
-            project.save()
+            project.record_download(
+                source_filename=result.path.name,
+                size_bytes=result.bytes_written,
+                title="" if title else result.path.stem.replace("_", " "),
+            )
             bus.stage_end(stage, f"Downloaded {result.path.name}")
             return {
                 "project_id": project.id,

@@ -845,6 +845,86 @@ def test_project_title_cannot_be_blank(client):
     assert client.get(f"/api/projects/{project['id']}").json()["title"] == "meeting"
 
 
+def test_a_chosen_title_survives_an_analysis_that_started_before_the_rename(client):
+    payload = client.post(
+        "/api/projects", files={"video": ("talk.mp4", b"video", "video/mp4")}
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    # Hold the project the way a running analysis job does: a snapshot taken
+    # before the rename, so writing it back must not undo the new name.
+    running_job = state.store.get(payload["id"])
+
+    client.post(f"/api/projects/{payload['id']}/rename", json={"title": "Day 4 part 3"})
+    running_job.save_analysis(
+        AnalysisReport(
+            project_id=payload["id"],
+            title="Something The Model Invented",
+            media=MediaInfo(path="talk.mp4", duration_s=120.0, has_audio=True),
+        )
+    )
+
+    reloaded = client.get(f"/api/projects/{payload['id']}").json()
+    assert reloaded["title"] == "Day 4 part 3"
+    assert reloaded["status"] == "ready"
+
+
+def test_an_unrenamed_project_still_takes_its_title_from_the_analysis(client):
+    payload = client.post(
+        "/api/projects", files={"video": ("talk.mp4", b"video", "video/mp4")}
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+
+    state.store.get(payload["id"]).save_analysis(
+        AnalysisReport(
+            project_id=payload["id"],
+            title="Introduction to drivers",
+            media=MediaInfo(path="talk.mp4", duration_s=120.0, has_audio=True),
+        )
+    )
+
+    assert (
+        client.get(f"/api/projects/{payload['id']}").json()["title"]
+        == "Introduction to drivers"
+    )
+
+
+def test_a_project_that_lost_its_metadata_is_recovered_from_the_recording(client):
+    payload = client.post(
+        "/api/projects", files={"video": ("keynote.mp4", b"video", "video/mp4")}
+    ).json()
+    state = client.app.state.clipdesk.authenticate({})
+    (state.store.workspace / payload["id"] / "project.json").unlink()
+
+    listed = client.get("/api/projects").json()
+
+    assert [item["id"] for item in listed] == [payload["id"]]
+    assert listed[0]["source_filename"] == "keynote.mp4"
+    # Recovered for good, not re-derived on every listing.
+    assert (state.store.workspace / payload["id"] / "project.json").is_file()
+
+
+def test_a_folder_holding_no_recording_is_not_mistaken_for_a_project(client):
+    state = client.app.state.clipdesk.authenticate({})
+    (state.store.workspace / "assets").mkdir(parents=True, exist_ok=True)
+    (state.store.workspace / "assets" / "Intro.mp4").write_bytes(b"video")
+
+    assert client.get("/api/projects").json() == []
+
+
+def test_every_project_is_listed_rather_than_a_recent_handful(client):
+    made = [
+        client.post(
+            "/api/projects", files={"video": (f"talk-{index}.mp4", b"video", "video/mp4")}
+        ).json()["id"]
+        for index in range(12)
+    ]
+
+    listed = client.get("/api/projects").json()
+
+    assert len(listed) == 12
+    assert sorted(item["id"] for item in listed) == sorted(made)
+
+
 # --- the queue ---------------------------------------------------------------
 @pytest.fixture
 def analysed(client, monkeypatch):
