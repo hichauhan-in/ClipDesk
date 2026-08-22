@@ -6,7 +6,7 @@ import { confirmAction, debounce, h, mount, numberField, openDialog, toast } fro
 import { bytes, compactCount, duration, timecode } from "../format.js";
 import { createJobPanel } from "../jobpanel.js";
 import { createJobsChip } from "../jobschip.js";
-import { latestForTab, refreshJobs } from "../jobs.js";
+import { latestForTab, onJobSettled, primeJobs, refreshJobs } from "../jobs.js";
 import { markdownToHtml } from "../markdown.js";
 import { createQueue, queuePanel, runOrQueue, withQueued } from "../queue.js";
 import { createAssetImporter } from "./assetimporter.js";
@@ -77,6 +77,9 @@ export async function renderProject(root, ctx, projectId, params) {
     analysis = await api.getAnalysis(projectId).catch(() => null);
   }
   const initialJobs = await api.listJobs(projectId).catch(() => ({ jobs: [] }));
+  // Polling runs on a timer, so without this a tab drawn straight after
+  // navigating would ask what ran here and be told nothing had.
+  primeJobs(initialJobs.jobs || []);
   const activeAnalysisJob = (initialJobs.jobs || []).find(
     (job) => job.kind === "analyze" && (job.status === "queued" || job.status === "running")
   ) || null;
@@ -124,6 +127,24 @@ export async function renderProject(root, ctx, projectId, params) {
     }
     drawTab();
   }
+
+  // A job that finishes while its tab is off screen still changed the project:
+  // new files, a new status. Take the fresh copy quietly so the next time that
+  // tab is drawn it shows the result — redrawing now would throw away whatever
+  // the user is part-way through on the tab they are actually looking at.
+  const stopWatching = onJobSettled(async (job) => {
+    if (ctx.isCurrent?.() === false) {
+      stopWatching();
+      return;
+    }
+    if (job.project_id !== projectId || job.status !== "done") return;
+    const fresh = await api.getProject(projectId).catch(() => null);
+    if (!fresh || ctx.isCurrent?.() === false) return;
+    project = fresh;
+    if (!analysis && fresh.status === "ready") {
+      analysis = await api.getAnalysis(projectId).catch(() => null);
+    }
+  });
 
   function drawTab() {
     // Keep the tab in the URL so finishing a job — which re-reads the project —
@@ -938,6 +959,18 @@ function notesView(project, analysis, jobPanel, ctx, queue) {
     }
   }
 
+  resumeWork({
+    projectId: project.id,
+    tab: "transcript",
+    kinds: ["notes"],
+    jobPanel,
+    title: "Writing notes",
+    onFinished: () => {
+      toast("Notes ready.", "ok");
+      ctx.refresh();
+    },
+  });
+
   return h(
     "div.grid",
     { style: { gridTemplateColumns: "minmax(300px, 1fr) minmax(0, 2fr)" } },
@@ -1051,6 +1084,18 @@ function articleView(project, analysis, jobPanel, ctx, queue) {
       .map((piece) => piece.trim())
       .filter(Boolean)
       .slice(0, 8),
+  });
+
+  resumeWork({
+    projectId: project.id,
+    tab: "transcript",
+    kinds: ["article"],
+    jobPanel,
+    title: "Writing the article",
+    onFinished: () => {
+      toast("Article ready — see Outputs.", "ok");
+      ctx.refresh();
+    },
   });
 
   function drawActions() {
@@ -1408,6 +1453,22 @@ function resumeSearch({ projectId, tab, kinds, jobPanel, results, searching, onR
   }
 }
 
+/**
+ * Pick a job back up after the view was rebuilt around it.
+ *
+ * Leaving the project throws away the progress panel, not the work. Coming back
+ * has to find the job again, or the pane sits there looking idle while its output
+ * is still being written — and nothing would redraw it when the file lands.
+ */
+function resumeWork({ projectId, tab, kinds, jobPanel, title, onFinished }) {
+  const job = latestForTab(projectId, tab, kinds);
+  if (!job || !["queued", "running"].includes(job.status)) return;
+  jobPanel.follow(job.id, {
+    title: job.label || title,
+    onDone: () => onFinished?.(),
+  });
+}
+
 function clipTab(project, analysis, jobPanel, ctx, preset = null, queue = null) {
   let mode = preset?.mode === "span" ? "duration" : preset?.mode || "cleanup";
   const results = h("div");
@@ -1660,6 +1721,11 @@ function clipTab(project, analysis, jobPanel, ctx, preset = null, queue = null) 
           candidates: found.candidates,
           actionLabel: mode === "highlight" ? "Export selected" : "Render selected",
           allowCombine: true,
+          // Ties the remembered choices to this exact set of options, so a new
+          // search starts clean but coming back to the old one does not.
+          stateKey: `${project.id}:${mode}:${found.candidates
+            .map((candidate) => Math.round(candidate.start))
+            .join("-")}`,
           combineDefault: mode === "topic",
           combineLabel:
             mode === "highlight"
@@ -1869,6 +1935,18 @@ function cleanupView(project, analysis, jobPanel, ctx, queue) {
   });
 
   refreshPlan();
+
+  resumeWork({
+    projectId: project.id,
+    tab: "clip",
+    kinds: ["cleanup"],
+    jobPanel,
+    title: "Cutting",
+    onFinished: () => {
+      toast("Clean cut ready — see Outputs.", "ok");
+      ctx.refresh();
+    },
+  });
 
   return h(
     "div.grid",

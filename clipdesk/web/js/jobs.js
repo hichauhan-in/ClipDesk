@@ -16,6 +16,8 @@ let inFlight = false;
 //: Jobs already announced, so a finished job is toasted once and not on every poll.
 const announced = new Set();
 const announcers = new Set();
+//: jobId -> handlers waiting for it to finish, however the app finds out.
+const waiters = new Map();
 
 export function isActive(job) {
   return ACTIVE.has(job.status);
@@ -34,6 +36,7 @@ async function poll() {
     const next = payload.jobs || [];
     announce(next);
     jobs = next;
+    settle(next);
     for (const listener of listeners) listener(jobs);
   } catch {
     // A failed poll is not worth surfacing; the next one will either work or
@@ -60,6 +63,59 @@ function announce(next) {
 function schedule() {
   clearTimeout(timer);
   timer = setTimeout(poll, interval());
+}
+
+/** Hand a finished job to whoever asked to be told about it. */
+function settle(next) {
+  for (const job of next) {
+    if (isActive(job)) continue;
+    const handlers = waiters.get(job.id);
+    if (!handlers) continue;
+    waiters.delete(job.id);
+    for (const handler of handlers) handler(job);
+  }
+}
+
+/**
+ * Fold a freshly fetched list into the store.
+ *
+ * Polling is on a timer, so a view that has just navigated would otherwise ask
+ * "what ran here?" against whatever the store last saw — which on a cold load is
+ * nothing at all. Priming with the list the view already fetched means a tab can
+ * restore itself immediately instead of looking empty until the next tick.
+ */
+export function primeJobs(incoming) {
+  if (!incoming?.length) return jobs;
+  const byId = new Map(jobs.map((job) => [job.id, job]));
+  for (const job of incoming) byId.set(job.id, job);
+  jobs = [...byId.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  settle(jobs);
+  for (const listener of listeners) listener(jobs);
+  return jobs;
+}
+
+/**
+ * Call back when a job reaches a terminal state, whoever is watching.
+ *
+ * The event stream belongs to whichever job the progress panel is showing, so it
+ * cannot be what decides that work finished — start a second job and the first
+ * one's stream is gone. Polling sees every job, so results survive both tab
+ * switches and other jobs starting.
+ */
+export function whenJobSettles(jobId, handler) {
+  if (!jobId) return () => {};
+  const known = jobs.find((job) => job.id === jobId);
+  if (known && !isActive(known)) {
+    handler(known);
+    return () => {};
+  }
+  const handlers = waiters.get(jobId) || new Set();
+  handlers.add(handler);
+  waiters.set(jobId, handlers);
+  return () => {
+    handlers.delete(handler);
+    if (!handlers.size) waiters.delete(jobId);
+  };
 }
 
 export function startJobStore() {

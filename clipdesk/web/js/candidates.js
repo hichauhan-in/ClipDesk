@@ -8,6 +8,38 @@
 import { h, mount } from "./dom.js";
 import { duration, timecode } from "./format.js";
 
+// Picking is real work: a dozen decisions and a filename. Losing it because the
+// user looked at the transcript means doing all of it again, so it is kept for
+// the session and dropped once the choice has actually been acted on.
+const PICK_PREFIX = "clipdesk:pick:";
+
+function readPick(key) {
+  if (!key) return null;
+  try {
+    return JSON.parse(sessionStorage.getItem(PICK_PREFIX + key) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function writePick(key, value) {
+  if (!key) return;
+  try {
+    sessionStorage.setItem(PICK_PREFIX + key, JSON.stringify(value));
+  } catch {
+    /* Private mode or a full store: the picker still works, it just forgets. */
+  }
+}
+
+function forgetPick(key) {
+  if (!key) return;
+  try {
+    sessionStorage.removeItem(PICK_PREFIX + key);
+  } catch {
+    /* nothing to do */
+  }
+}
+
 /**
  * @param {object} options
  * @param {Array} options.candidates
@@ -18,6 +50,8 @@ import { duration, timecode } from "./format.js";
  * @param {string} options.outputNameDefault
  * @param {(selection: Array, opts: {combine: boolean, outputName: string}) => void} options.onRender
  * @param {(candidate: object) => void} [options.onPreview]
+ * @param {string} [options.stateKey] identifies this set of options, so the
+ *   choices made against it survive leaving the tab
  */
 export function candidatePicker({
   candidates,
@@ -26,16 +60,31 @@ export function candidatePicker({
   combineDefault = false,
   combineLabel = "Join into a single video with transitions",
   outputNameDefault = "clip.mp4",
+  stateKey = "",
   onRender,
   onPreview,
 }) {
-  const selected = new Set(candidates.map((_, index) => index));
-  let combine = combineDefault;
+  const saved = readPick(stateKey);
+  const restored = saved && saved.total === candidates.length ? saved : null;
+  const selected = new Set(
+    restored ? restored.selected.filter((index) => index < candidates.length) : candidates.map((_, index) => index)
+  );
+  let combine = restored ? restored.combine : combineDefault;
   const outputName = h("input", {
     type: "text",
-    value: outputNameDefault,
+    value: restored ? restored.outputName : outputNameDefault,
     placeholder: "clip.mp4",
+    oninput: () => remember(),
   });
+
+  function remember() {
+    writePick(stateKey, {
+      total: candidates.length,
+      selected: [...selected],
+      combine,
+      outputName: outputName.value,
+    });
+  }
 
   const summaryLine = h("div.muted.small");
   const combineRow = h("div", { style: { display: allowCombine ? "" : "none" } });
@@ -63,6 +112,7 @@ export function candidatePicker({
       .sort((a, b) => a - b)
       .map((index) => candidates[index]);
     if (chosen.length) {
+      forgetPick(stateKey);
       onRender(chosen, {
         combine: allowCombine && combine && chosen.length > 1,
         outputName: outputName.value.trim(),
@@ -71,19 +121,21 @@ export function candidatePicker({
   }
 
   const rows = candidates.map((candidate, index) => {
+    const picked = selected.has(index);
     const checkbox = h("input", {
       type: "checkbox",
-      checked: true,
+      checked: picked,
       onchange: (event) => {
         if (event.target.checked) selected.add(index);
         else selected.delete(index);
         row.classList.toggle("picked", event.target.checked);
+        remember();
         refresh();
       },
     });
 
     const row = h(
-      "div.pick.picked",
+      `div.pick${picked ? ".picked" : ""}`,
       h("label.pick-check", checkbox),
       h(
         "div.pick-body",
@@ -119,9 +171,10 @@ export function candidatePicker({
       "label.check",
       h("input", {
         type: "checkbox",
-        checked: combineDefault,
+        checked: combine,
         onchange: (event) => {
           combine = event.target.checked;
+          remember();
         },
       }),
       combineLabel
@@ -142,6 +195,7 @@ export function candidatePicker({
               candidates.forEach((_, index) => selected.add(index));
               container.querySelectorAll(".pick input").forEach((box) => (box.checked = true));
               container.querySelectorAll(".pick").forEach((el) => el.classList.add("picked"));
+              remember();
               refresh();
             },
           },
@@ -154,6 +208,7 @@ export function candidatePicker({
               selected.clear();
               container.querySelectorAll(".pick input").forEach((box) => (box.checked = false));
               container.querySelectorAll(".pick").forEach((el) => el.classList.remove("picked"));
+              remember();
               refresh();
             },
           },

@@ -2,7 +2,7 @@
 
 import { api, followJob } from "./api.js";
 import { h, mount, toast } from "./dom.js";
-import { refreshJobs } from "./jobs.js";
+import { refreshJobs, whenJobSettles } from "./jobs.js";
 
 const LINE_CLASS = {
   warning: "ln-warn",
@@ -31,6 +31,8 @@ export function createJobPanel() {
   );
 
   let stop = null;
+  //: The job the bar is currently drawing. Others may still be running.
+  let shown = null;
 
   function line(text, kind) {
     const el = h("div", { class: LINE_CLASS[kind] || "" }, text);
@@ -89,6 +91,7 @@ export function createJobPanel() {
   }
 
   function attach(jobId, { onDone, onError, onEvent } = {}) {
+    shown = jobId;
     cancelButton.style.display = "";
     cancelButton.disabled = false;
     cancelButton.textContent = "Cancel";
@@ -104,9 +107,57 @@ export function createJobPanel() {
         cancelButton.textContent = "Cancel";
       }
     };
+
+    // The panel shows one job at a time, but every job must still deliver its
+    // result: start a second one and the first loses the bar, not its outcome.
+    let settled = false;
+    const release = whenJobSettles(jobId, (job) => {
+      if (job.status === "done") finish(jobId, () => onDone?.(job.result));
+      else if (job.status === "cancelled") fail(jobId, "Cancelled by the user", onError);
+      else if (job.status === "failed") fail(jobId, job.error || "That job failed.", onError);
+    });
+
+    function finish(id, deliver) {
+      if (settled) return;
+      settled = true;
+      release();
+      if (shown === id) {
+        stop?.();
+        stop = null;
+        cancelButton.style.display = "none";
+        setProgress(1);
+        label.textContent = "Finished";
+      }
+      refreshJobs();
+      deliver();
+    }
+
+    function fail(id, message, report) {
+      if (settled) return;
+      settled = true;
+      release();
+      if (shown === id) {
+        stop?.();
+        stop = null;
+        cancelButton.style.display = "none";
+        bar.classList.remove("indeterminate");
+        fill.style.width = "100%";
+        fill.style.background = message === "Cancelled by the user" ? "var(--warn)" : "var(--bad)";
+        label.textContent = message === "Cancelled by the user" ? "Cancelled" : "Failed";
+        line(message, message === "Cancelled by the user" ? "warning" : "error");
+      }
+      // The job store records this with its own context; a second copy would
+      // just be the same failure twice.
+      if (message !== "Cancelled by the user") toast(message, "err", { record: false });
+      refreshJobs();
+      report?.(new Error(message));
+    }
+
+    if (settled) return;
     stop = followJob(jobId, {
       onEvent(event) {
         onEvent?.(event);
+        if (shown !== jobId) return;
         if (event.message) {
           const stage = event.stage ? `[${event.stage}] ` : "";
           line(`${stage}${event.message}`, event.type);
@@ -119,44 +170,22 @@ export function createJobPanel() {
         if (event.type === "warning") toast(event.message, "");
       },
       onDone(result) {
-        stop = null;
-        cancelButton.style.display = "none";
-        setProgress(1);
-        label.textContent = "Finished";
-        refreshJobs();
-        onDone?.(result);
+        finish(jobId, () => onDone?.(result));
       },
       onError(message) {
-        stop = null;
-        cancelButton.style.display = "none";
-        bar.classList.remove("indeterminate");
-        fill.style.width = "100%";
-        fill.style.background = "var(--bad)";
-        label.textContent = "Failed";
-        line(message, "error");
-        // The job store records this with its own context; a second copy would
-        // just be the same failure twice.
-        toast(message, "err", { record: false });
-        refreshJobs();
-        onError?.(new Error(message));
+        fail(jobId, message, onError);
       },
       onCancelled() {
-        stop = null;
-        cancelButton.style.display = "none";
-        bar.classList.remove("indeterminate");
-        fill.style.width = "100%";
-        fill.style.background = "var(--warn)";
-        label.textContent = "Cancelled";
-        line("Cancelled by the user", "warning");
-        refreshJobs();
-        onError?.(new Error("Cancelled by the user"));
+        fail(jobId, "Cancelled by the user", onError);
       },
     });
   }
 
+  /** Stop drawing the current job. Its result is still delivered. */
   function cancel() {
     stop?.();
     stop = null;
+    shown = null;
     cancelButton.style.display = "none";
     cancelButton.disabled = false;
     cancelButton.textContent = "Cancel";

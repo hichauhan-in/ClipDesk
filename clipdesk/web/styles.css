@@ -232,8 +232,16 @@ label.field, .field { display: block; }
 label.field > span, .field > span { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 5px; }
 .disabled-field { opacity: 0.42; }
 .disabled-field input { cursor: not-allowed; }
-.transcript-chip { cursor: copy; }
-.transcript-chip:hover { border-color: var(--accent-dim); color: var(--text); }
+/* A button, so it needs the chip look spelled out: left alone it takes the
+   platform's raised grey border, which is the one control that ignores the theme. */
+.transcript-chip {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--border); background: var(--bg-input);
+  color: var(--text-dim); cursor: copy; line-height: 1.5;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.transcript-chip:hover { background: #232c40; border-color: var(--accent-dim); color: var(--text); }
+.transcript-chip:active { background: var(--accent-dim); color: #eaf2ff; }
 input[type="text"], input[type="number"], input[type="url"], input[type="search"],
 select, textarea {
   width: 100%; background: var(--bg-input); border: 1px solid var(--border);
